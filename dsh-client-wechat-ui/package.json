@@ -1,0 +1,18 @@
+{
+  "name": "dsh-client-wechat-ui",
+  "version": "0.1.0",
+  "description": "DeepSeek Harness browser plugin: floating WeChat ball with QR-code login panel, sender approval list, and live message log. Talks to the wechat-gateway service directly.",
+  "type": "module",
+  "main": "host.js",
+  "exports": {
+    ".": "./host.js",
+    "./client": "./client.js",
+    "./package.json": "./package.json"
+  },
+  "dsh": {
+    "client": {
+      "platform": "web"
+    }
+  },
+  "license": "MIT"
+}

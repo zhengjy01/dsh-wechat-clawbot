@@ -1,0 +1,11 @@
+# 依赖与构建产物
+node_modules/
+dist/
+*.tsbuildinfo
+
+# 运行时数据（登录凭证、模型配置、会话映射）
+.dsh-wechat/
+*.log
+
+# 系统文件
+.DS_Store

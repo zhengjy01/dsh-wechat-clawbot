@@ -1,0 +1,11 @@
+{
+  "name": "wechat-gateway",
+  "version": "0.1.0",
+  "description": "Standalone WeChat (Weixin) iLink bot gateway for DeepSeek Harness: QR login, message receive/send over HTTP + SSE. No OpenClaw required.",
+  "type": "module",
+  "main": "gateway.mjs",
+  "dependencies": {
+    "qrcode": "^1.5.4"
+  },
+  "license": "MIT"
+}

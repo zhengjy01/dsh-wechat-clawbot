@@ -1,0 +1,43 @@
+{
+  "name": "dsh-wechat-clawbot",
+  "version": "0.1.0",
+  "description": "DSH bundle: WeChat floating-ball bridge (QR login, message relay, ClawBot model config)",
+  "type": "module",
+  "main": "index.js",
+  "files": [
+    "index.js",
+    "cordis.patch.yml",
+    "dsh-wechat-bot",
+    "dsh-client-wechat-ui",
+    "dsh-wechat-bridge",
+    "wechat-gateway",
+    "install-wechat.sh",
+    "install-dsh-bridge.sh",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "prepare": "npm install --prefix wechat-gateway --no-audit --no-fund"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  },
+  "dependencies": {
+    "dsh-wechat-bot": "file:./dsh-wechat-bot",
+    "dsh-client-wechat-ui": "file:./dsh-client-wechat-ui",
+    "dsh-wechat-bridge": "file:./dsh-wechat-bridge",
+    "wechat-gateway": "file:./wechat-gateway"
+  },
+  "keywords": [
+    "dsh-plugin",
+    "deepseek-harness",
+    "wechat"
+  ],
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/lubaiUwU/DSH-WeChatClawBot.git"
+  }
+}
