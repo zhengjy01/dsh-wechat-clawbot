@@ -21,6 +21,7 @@
 import { spawn } from 'node:child_process'
 import { createServer } from 'node:http'
 import fs from 'node:fs'
+import { homedir } from 'node:os'
 import { fileURLToPath } from 'node:url'
 import { dirname, join, isAbsolute } from 'node:path'
 import Schema from '@deepseek-ai/schemastery'
@@ -126,7 +127,7 @@ const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
  */
 export function apply(ctx, config) {
   const logger = ctx.logger
-  const stateBase = config.stateDir !== '' ? config.stateDir : join(process.env.HOME ?? '.', '.dsh-wechat')
+  const stateBase = config.stateDir !== '' ? config.stateDir : join(homedir(), '.dsh-wechat')
 
   // bridgeConfig 是传给 createBridge 的共享配置对象；modelOverride 槽由
   // 模型端点动态替换，bridge 每次 model 请求实时读取（不会丢失）。

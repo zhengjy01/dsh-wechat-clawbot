@@ -31,7 +31,7 @@ dsh-client-wechat-ui ← 浏览器悬浮球（扫码/验证码/白名单/模型�
 
 | 依赖 | 要求 | 说明 |
 |---|---|---|
-| 操作系统 | macOS / Linux | Windows 未测试（DSH profile 链接方式需适配） |
+| 操作系统 | **Windows / macOS / Linux** | 推荐 `dsh plugin add`；Windows 也可 `.\install-wechat.ps1` |
 | DeepSeek Harness | 已安装并运行过 `dsh web` | 需要存在 web profile（`$DSH_HOME/profiles/web/`） |
 | Node.js | **>= 22.19**（建议 22.x 或 24.x LTS） | 与 DSH 引擎要求一致；网关与插件同标准 |
 | npm | 任意较新版本 | 安装 wechat-gateway 的 `qrcode` 依赖 |
@@ -48,7 +48,7 @@ dsh-client-wechat-ui ← 浏览器悬浮球（扫码/验证码/白名单/模型�
 | `127.0.0.1:51236` | dsh-wechat-bot 模型端点 | 悬浮球读写「ClawBot 使用模型」配置 |
 | `~/.dsh-wechat/` | 状态目录 | 登录凭证、白名单、模型配置（`clawbot-model.json`）、会话映射（`bridge-sessions.json`）、对话区编号（`wechat-session.json`） |
 
-`$DSH_HOME` 默认 `~/Library/Application Support/DeepSeekHarness`（macOS），可用环境变量 `DSH_HOME` 覆盖。
+`$DSH_HOME` 默认 **`~/.dsh`**（Windows：`C:\Users\<你>\.dsh`）；Mac 桌面 `.app` 可能是 `~/Library/Application Support/DeepSeekHarness`。可用环境变量 `DSH_HOME` 覆盖。
 
 ## 📦 目录结构
 
@@ -60,7 +60,8 @@ DSH-WeChatClawBot/
 ├── dsh-wechat-bot/       # DSH 宿主插件（管理网关进程、会话注入、模型端点）
 ├── dsh-client-wechat-ui/ # 浏览器悬浮球插件（零依赖 bundle）
 ├── dsh-wechat-bridge/    # 会话驱动核心（createBridge + 可选 HTTP 桥 + 单元测试）
-├── install-wechat.sh     # 一键安装（软链方案，无需 pnpm）
+├── install-wechat.sh     # 一键安装（软链方案，macOS/Linux/Git Bash）
+├── install-wechat.ps1    # 一键安装（PowerShell，Windows 原生）
 ├── install-dsh-bridge.sh # 安装 HTTP 桥（可选，OpenClaw 转发方案用）
 └── README.md
 ```
@@ -81,7 +82,10 @@ AI 会执行（等价于）：
 dsh plugin --profile web add github:lubaiUwU/DSH-WeChatClawBot
 ```
 
-pnpm ≥10 首次安装若提示 `allowBuilds`，在 `$DSH_HOME/profiles/web/pnpm-workspace.yaml` 加入后重跑：
+pnpm ≥10 首次安装若提示 `allowBuilds`，在 profile 的 `pnpm-workspace.yaml` 加入后重跑：
+
+- macOS/Linux：`$DSH_HOME/profiles/web/pnpm-workspace.yaml`
+- Windows：`%USERPROFILE%\.dsh\profiles\web\pnpm-workspace.yaml`（或你的 `$DSH_HOME` 路径）
 
 ```yaml
 allowBuilds:
@@ -92,10 +96,20 @@ allowBuilds:
 
 ### 手动安装（脚本）
 
+**macOS / Linux / Git Bash：**
+
 ```sh
 git clone https://github.com/lubaiUwU/DSH-WeChatClawBot
 cd DSH-WeChatClawBot
 bash install-wechat.sh
+```
+
+**Windows PowerShell：**
+
+```powershell
+git clone https://github.com/lubaiUwU/DSH-WeChatClawBot
+cd DSH-WeChatClawBot
+.\install-wechat.ps1
 ```
 
 ### 手动安装（DSH 插件命令）

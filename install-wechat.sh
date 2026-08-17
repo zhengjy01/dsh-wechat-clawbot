@@ -2,6 +2,7 @@
 # install-wechat.sh — 把「微信悬浮球扫码桥接」装进当前 DSH 的 web profile。
 #
 # 用法:  bash install-wechat.sh
+# Windows 也可用 Git Bash 运行本脚本，或执行: .\install-wechat.ps1
 #
 # 安装内容（全部幂等，可重复执行）:
 #   1. wechat-gateway/ 依赖安装（qrcode）。
@@ -14,16 +15,14 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=scripts/lib.sh
+source "$SCRIPT_DIR/scripts/lib.sh"
+
 GATEWAY_DIR="$SCRIPT_DIR/wechat-gateway"
 BOT_DIR="$SCRIPT_DIR/dsh-wechat-bot"
 UI_DIR="$SCRIPT_DIR/dsh-client-wechat-ui"
 
-if [[ -n "${DSH_HOME:-}" ]]; then
-  DSH_HOME_DIR="$DSH_HOME"
-else
-  DSH_HOME_DIR="$HOME/Library/Application Support/DeepSeekHarness"
-fi
-
+DSH_HOME_DIR="$(resolve_dsh_home)"
 PROFILE_DIR="$DSH_HOME_DIR/profiles/web"
 FALLBACK_NM="$DSH_HOME_DIR/profiles/node_modules"
 PROFILE_NM="$PROFILE_DIR/node_modules"
@@ -48,15 +47,16 @@ SHIM="$BOT_DIR/node_modules"
 mkdir -p "$SHIM/@deepseek-ai"
 for pkg in cordis schemastery dsh-agent dsh-llm dsh-session dsh-settings; do
   if [[ -e "$FALLBACK_NM/@deepseek-ai/$pkg" ]]; then
-    ln -sfn "$FALLBACK_NM/@deepseek-ai/$pkg" "$SHIM/@deepseek-ai/$pkg"
+    link_dir "$FALLBACK_NM/@deepseek-ai/$pkg" "$SHIM/@deepseek-ai/$pkg"
   fi
 done
-ln -sfn "$SCRIPT_DIR/dsh-wechat-bridge" "$SHIM/dsh-wechat-bridge"
-ln -sfn "$BOT_DIR" "$PROFILE_NM/dsh-wechat-bot"
+link_dir "$SCRIPT_DIR/dsh-wechat-bridge" "$SHIM/dsh-wechat-bridge"
+mkdir -p "$PROFILE_NM"
+link_dir "$BOT_DIR" "$PROFILE_NM/dsh-wechat-bot"
 echo "==> 已链接 dsh-wechat-bot（含依赖垫片）"
 
 # 3. 悬浮球 client 插件
-ln -sfn "$UI_DIR" "$PROFILE_NM/dsh-client-wechat-ui"
+link_dir "$UI_DIR" "$PROFILE_NM/dsh-client-wechat-ui"
 echo "==> 已链接 dsh-client-wechat-ui"
 
 # 4. patch 注入（幂等）

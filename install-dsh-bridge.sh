@@ -2,6 +2,7 @@
 # install-dsh-bridge.sh — 把 dsh-wechat-bridge 安装进当前 DSH 的 web profile。
 #
 # 用法:  bash install-dsh-bridge.sh
+# Windows 也可用 Git Bash 运行本脚本。
 #
 # 做的事（全部幂等，可重复执行）:
 #   1. 在插件目录里创建 node_modules 垫片，把 @deepseek-ai/* 软链到
@@ -13,15 +14,12 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=scripts/lib.sh
+source "$SCRIPT_DIR/scripts/lib.sh"
+
 PLUGIN_DIR="$SCRIPT_DIR/dsh-wechat-bridge"
 
-# DSH 数据目录（macOS 默认）; 可用 DSH_HOME 环境变量覆盖。
-if [[ -n "${DSH_HOME:-}" ]]; then
-  DSH_HOME_DIR="$DSH_HOME"
-else
-  DSH_HOME_DIR="$HOME/Library/Application Support/DeepSeekHarness"
-fi
-
+DSH_HOME_DIR="$(resolve_dsh_home)"
 PROFILE_DIR="$DSH_HOME_DIR/profiles/web"
 FALLBACK_NM="$DSH_HOME_DIR/profiles/node_modules"
 PROFILE_NM="$PROFILE_DIR/node_modules"
@@ -38,7 +36,7 @@ SHIM="$PLUGIN_DIR/node_modules/@deepseek-ai"
 mkdir -p "$SHIM"
 for pkg in cordis dsh-agent dsh-llm dsh-session schemastery; do
   if [[ -e "$FALLBACK_NM/@deepseek-ai/$pkg" ]]; then
-    ln -sfn "$FALLBACK_NM/@deepseek-ai/$pkg" "$SHIM/$pkg"
+    link_dir "$FALLBACK_NM/@deepseek-ai/$pkg" "$SHIM/$pkg"
   else
     echo "警告: $FALLBACK_NM/@deepseek-ai/$pkg 不存在，跳过 $pkg" >&2
   fi
@@ -47,7 +45,7 @@ echo "==> 已就绪插件依赖垫片 $SHIM"
 
 # 2. 把插件链接进 profile 的 node_modules
 mkdir -p "$PROFILE_NM"
-ln -sfn "$PLUGIN_DIR" "$PROFILE_NM/dsh-wechat-bridge"
+link_dir "$PLUGIN_DIR" "$PROFILE_NM/dsh-wechat-bridge"
 echo "==> 已链接 $PROFILE_NM/dsh-wechat-bridge"
 
 # 3. 注入 patch 行（幂等）

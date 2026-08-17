@@ -12,7 +12,9 @@
     "dsh-wechat-bridge",
     "wechat-gateway",
     "install-wechat.sh",
+    "install-wechat.ps1",
     "install-dsh-bridge.sh",
+    "scripts/lib.sh",
     "README.md",
     "LICENSE"
   ],
