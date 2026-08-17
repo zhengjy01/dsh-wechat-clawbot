@@ -1,5 +1,8 @@
 # DSH-WeChatClawBot — 微信悬浮球扫码桥接
 
+**安装（用户只需这一句）：** 对 DSH 说 `请帮我安装插件 https://github.com/lubaiUwU/DSH-WeChatClawBot`  
+Windows / macOS / Linux、DSH Desktop 与 CLI 都适用。profile、`allowBuilds`、依赖垫片由安装方按下方「给安装 Agent 的步骤」自动处理，用户不用额外交代。
+
 给 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness)（`dsh`）装一个插件后，GUI 右下角出现**微信绿色悬浮球**：点开 → 手机微信扫码登录 → 之后微信里发给你的消息**直接进入独立的微信对话区**（不会混进 GUI 会话），由 DSH 的 agent 处理，回复自动回传微信。
 
 不需要 OpenClaw、不需要任何外部服务。微信接入使用腾讯官方渠道协议（iLink，与 `@tencent-weixin/openclaw-weixin` 同源，MIT 许可），本项目把协议核心抽成了独立网关服务。
@@ -32,7 +35,7 @@ dsh-client-wechat-ui ← 浏览器悬浮球（扫码/验证码/白名单/模型�
 | 依赖 | 要求 | 说明 |
 |---|---|---|
 | 操作系统 | **Windows / macOS / Linux** | 推荐 `dsh plugin add`；Windows 也可 `.\install-wechat.ps1` |
-| DeepSeek Harness | 已安装并运行过 **DSH Desktop** 或 `dsh web` | 需要存在 profile：Desktop 用 `desktop`，CLI Web 用 `web` |
+| DeepSeek Harness | 已安装 DSH Desktop 或能跑 `dsh` | 用户只需说「请帮我安装插件」+ 本仓库 URL；profile 由安装方自动检测 |
 | Node.js | **>= 22.19**（建议 22.x 或 24.x LTS） | 与 DSH 引擎要求一致；网关与插件同标准 |
 | npm | 任意较新版本 | 安装 wechat-gateway 的 `qrcode` 依赖 |
 | 微信账号 | 一个可扫码的手机微信 | **建议小号**：个人微信自动化存在账号风控风险，请自行评估 |
@@ -48,9 +51,7 @@ dsh-client-wechat-ui ← 浏览器悬浮球（扫码/验证码/白名单/模型�
 | `127.0.0.1:51236` | dsh-wechat-bot 模型端点 | 悬浮球读写「ClawBot 使用模型」配置 |
 | `~/.dsh-wechat/` | 状态目录 | 登录凭证、白名单、模型配置（`clawbot-model.json`）、会话映射（`bridge-sessions.json`）、对话区编号（`wechat-session.json`） |
 
-`$DSH_HOME` 默认 **`~/.dsh`**（Windows：`C:\Users\<你>\.dsh`）；Mac 桌面 `.app` 可能是 `~/Library/Application Support/DeepSeekHarness`。可用环境变量 `DSH_HOME` 覆盖。
-
-**Windows DSH Desktop** 用户的 profile 通常是 `~/.dsh/profiles/desktop/`，不是 `web`。安装命令请带 `--profile desktop`。
+`$DSH_HOME` 默认 **`~/.dsh`**（Windows：`C:\Users\<你>\.dsh`）；Mac 桌面 `.app` 可能是 `~/Library/Application Support/DeepSeekHarness`。可用环境变量 `DSH_HOME` 覆盖。DSH Desktop 的 profile 一般叫 `desktop`，CLI Web 一般叫 `web`（安装 Agent 会自动选，用户不用记）。
 
 ## 📦 目录结构
 
@@ -71,35 +72,43 @@ DSH-WeChatClawBot/
 
 ## 🚀 安装
 
-### 懒人版（推荐）
-
-对你的 DSH 说：
+用户只需对 DSH 说这一句（不必提 Windows、desktop、allowBuilds）：
 
 ```
-请帮我安装 DSH 的插件 https://github.com/lubaiUwU/DSH-WeChatClawBot
+请帮我安装插件 https://github.com/lubaiUwU/DSH-WeChatClawBot
 ```
 
-AI 会执行（等价于）：
+下面整节是给**正在执行安装的 AI / Agent**看的。用户不用说这些；你读完后自己做完，不要再追问用户选 profile。
 
-```sh
-# DSH Desktop（Windows 官方桌面版常见）
-dsh plugin --profile desktop add github:lubaiUwU/DSH-WeChatClawBot
+### 给安装 Agent 的步骤（必须按顺序做完）
 
-# 源码 / CLI 跑起来的 Web GUI
-dsh plugin --profile web add github:lubaiUwU/DSH-WeChatClawBot
-```
+1. **自动选定 profile，不要默认 web。**  
+   `$DSH_HOME` 一般为 `~/.dsh`（Windows：`%USERPROFILE%\.dsh`）。按下面优先级选一个已存在的目录名：
+   - `$DSH_HOME/profiles/desktop` 存在 → 用 **`desktop`**（DSH Desktop / Windows 官方桌面版几乎都是这个）
+   - 否则 `$DSH_HOME/profiles/web` 存在 → 用 **`web`**
+   - 否则看 `$DSH_HOME/profiles/` 下实际有哪个，用那个  
+   记作 `<profile>`。
 
-pnpm ≥10 首次安装若提示 `allowBuilds`，在对应 profile 的 `pnpm-workspace.yaml` 加入后重跑：
+2. **安装组合包：**
 
-- DSH Desktop：`$DSH_HOME/profiles/desktop/pnpm-workspace.yaml`（Windows 多为 `%USERPROFILE%\.dsh\profiles\desktop\pnpm-workspace.yaml`）
-- CLI Web：`$DSH_HOME/profiles/web/pnpm-workspace.yaml`
+   ```sh
+   dsh plugin --profile <profile> add github:lubaiUwU/DSH-WeChatClawBot
+   ```
 
-```yaml
-allowBuilds:
-  dsh-wechat-clawbot: true
-```
+3. **pnpm ≥10 若失败并提示 `allowBuilds`：** 不要停下来问用户。编辑  
+   `$DSH_HOME/profiles/<profile>/pnpm-workspace.yaml`  
+   在文件中加入（没有该键就新建）：
 
-安装完成后**重启 DeepSeek Harness**，右下角出现微信绿色悬浮球 → 扫码登录。
+   ```yaml
+   allowBuilds:
+     dsh-wechat-clawbot: true
+   ```
+
+   然后**再执行一次**第 2 步的 `dsh plugin add`。本仓库的 `prepare` / `postinstall` 会给 `dsh-wechat-bot` **和** `dsh-wechat-bridge` 链接 `@deepseek-ai/*` 垫片；不跑 prepare 时，DSH Desktop 会因找不到 `schemastery` 而启动闪退。
+
+4. **告诉用户重启 DSH / DSH Desktop。** 重启后右下角应出现微信绿色悬浮球 → 扫码登录。不要假设不重启也能用。
+
+5. **不要**只改 `cordis.patch.yml` 却不装包；**不要**假设 profile 一定是 `web`；**不要**用 `spawn` 网关时去掉 `ELECTRON_RUN_AS_NODE`（Windows Desktop 的 `process.execPath` 是 exe 不是 node）。
 
 ### 手动安装（脚本）
 
@@ -122,13 +131,12 @@ cd DSH-WeChatClawBot
 
 ### 手动安装（DSH 插件命令）
 
-在仓库目录旁执行：
+若你自己跑命令：先看 `$DSH_HOME/profiles/` 里是 `desktop` 还是 `web`，再用那个名字：
 
 ```sh
-dsh plugin --profile desktop add /path/to/DSH-WeChatClawBot
-# 或
 dsh plugin --profile desktop add github:lubaiUwU/DSH-WeChatClawBot
-# CLI Web 则把 desktop 换成 web
+# 或
+dsh plugin --profile web add github:lubaiUwU/DSH-WeChatClawBot
 ```
 
 ### 一键脚本（本地 checkout）
