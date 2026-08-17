@@ -1,6 +1,10 @@
 # install-wechat.ps1 — Windows PowerShell 安装脚本（与 install-wechat.sh 等价）
 # 用法:  .\install-wechat.ps1
-# 推荐:  dsh plugin --profile web add github:lubaiUwU/DSH-WeChatClawBot
+#        .\install-wechat.ps1 -Profile desktop
+# 推荐:  dsh plugin --profile desktop add github:lubaiUwU/DSH-WeChatClawBot
+param(
+    [string]$Profile = $env:DSH_PROFILE
+)
 
 $ErrorActionPreference = 'Stop'
 
@@ -8,6 +12,7 @@ $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $GatewayDir = Join-Path $ScriptDir 'wechat-gateway'
 $BotDir = Join-Path $ScriptDir 'dsh-wechat-bot'
 $UiDir = Join-Path $ScriptDir 'dsh-client-wechat-ui'
+$BridgeDir = Join-Path $ScriptDir 'dsh-wechat-bridge'
 
 function Resolve-DshHome {
     if ($env:DSH_HOME -and $env:DSH_HOME.Trim()) {
@@ -19,37 +24,79 @@ function Resolve-DshHome {
         (Join-Path $env:LOCALAPPDATA 'DeepSeekHarness')
     )
     foreach ($dir in $candidates) {
-        if (Test-Path (Join-Path $dir 'profiles\web')) {
+        if ((Test-Path (Join-Path $dir 'profiles\desktop')) -or
+            (Test-Path (Join-Path $dir 'profiles\web')) -or
+            (Test-Path (Join-Path $dir 'profiles\node_modules'))) {
             return $dir
         }
     }
     return (Join-Path $env:USERPROFILE '.dsh')
 }
 
+function Resolve-ProfileName {
+    param([string]$DshHome, [string]$Requested)
+    if ($Requested -and $Requested.Trim()) { return $Requested.Trim() }
+    if (Test-Path (Join-Path $DshHome 'profiles\desktop')) { return 'desktop' }
+    if (Test-Path (Join-Path $DshHome 'profiles\web')) { return 'web' }
+    return 'web'
+}
+
+function Remove-DirLink {
+    param([string]$Link)
+    if (-not (Test-Path $Link)) { return }
+    cmd /c "rmdir `"$Link`"" | Out-Null
+    if (Test-Path $Link) {
+        Remove-Item -Force -Recurse -LiteralPath $Link -ErrorAction SilentlyContinue
+    }
+}
+
 function Link-Dir {
     param([string]$Target, [string]$Link)
     $parent = Split-Path -Parent $Link
     New-Item -ItemType Directory -Force -Path $parent | Out-Null
-    if (Test-Path $Link) { Remove-Item -Force -Recurse $Link }
+    Remove-DirLink -Link $Link
     try {
-        New-Item -ItemType SymbolicLink -Path $Link -Target $Target | Out-Null
+        New-Item -ItemType Junction -Path $Link -Target $Target | Out-Null
         return
     } catch {
-        # Junction works without Developer Mode.
         cmd /c "mklink /J `"$Link`" `"$Target`"" | Out-Null
         if (-not (Test-Path $Link)) { throw "无法创建链接 $Link -> $Target" }
     }
 }
 
+function Add-PatchBlock {
+    param([string]$PatchFile, [string]$Marker, [string]$Block)
+    if ((Test-Path $PatchFile) -and (Select-String -Path $PatchFile -Pattern $Marker -Quiet)) {
+        Write-Host "==> $PatchFile 已包含 $Marker，跳过注入"
+        return
+    }
+    $parent = Split-Path -Parent $PatchFile
+    New-Item -ItemType Directory -Force -Path $parent | Out-Null
+    if (-not (Test-Path $PatchFile)) {
+        Set-Content -Path $PatchFile -Value $Block -Encoding utf8
+        Write-Host "==> 已注入 patch 行到 $PatchFile"
+        return
+    }
+    $raw = Get-Content -Raw -Path $PatchFile
+    $trimmed = ($raw -replace '\s', '')
+    if ([string]::IsNullOrEmpty($trimmed) -or $trimmed -eq '[]') {
+        Set-Content -Path $PatchFile -Value $Block -Encoding utf8
+    } else {
+        Add-Content -Path $PatchFile -Value "`n$Block" -Encoding utf8
+    }
+    Write-Host "==> 已注入 patch 行到 $PatchFile"
+}
+
 $DshHome = Resolve-DshHome
-$ProfileDir = Join-Path $DshHome 'profiles\web'
-$FallbackNm = Join-Path $DshHome 'profiles\node_modules'
+$ProfileName = Resolve-ProfileName -DshHome $DshHome -Requested $Profile
+$ProfileDir = Join-Path $DshHome "profiles\$ProfileName"
 $ProfileNm = Join-Path $ProfileDir 'node_modules'
 $PatchFile = Join-Path $ProfileDir 'cordis.patch.yml'
 
+Write-Host "==> DSH home: $DshHome"
 Write-Host "==> 目标 profile: $ProfileDir"
 if (-not (Test-Path $ProfileDir)) {
-    Write-Error "找不到 profile 目录（请先运行一次 dsh web，或设置 DSH_HOME）"
+    Write-Error "找不到 profile 目录（请先运行一次 DSH Desktop 或 dsh web，或设置 DSH_HOME / -Profile）"
 }
 
 if (-not (Test-Path (Join-Path $GatewayDir 'node_modules'))) {
@@ -61,24 +108,21 @@ if (-not (Test-Path (Join-Path $GatewayDir 'node_modules'))) {
     Write-Host '==> wechat-gateway 依赖已就绪'
 }
 
-$Shim = Join-Path $BotDir 'node_modules'
-$ShimDeepseek = Join-Path $Shim '@deepseek-ai'
-New-Item -ItemType Directory -Force -Path $ShimDeepseek | Out-Null
-foreach ($pkg in @('cordis', 'schemastery', 'dsh-agent', 'dsh-llm', 'dsh-session', 'dsh-settings')) {
-    $src = Join-Path $FallbackNm "@deepseek-ai\$pkg"
-    if (Test-Path $src) {
-        Link-Dir -Target $src -Link (Join-Path $ShimDeepseek $pkg)
-    }
+$shimScript = Join-Path $ScriptDir 'scripts\link-peer-shims.mjs'
+if (Get-Command node -ErrorAction SilentlyContinue) {
+    Write-Host '==> 链接 bot / bridge peer 垫片...'
+    node $shimScript
+} else {
+    Write-Warning '未找到 node，跳过 peer 垫片。请安装 Node.js，或改用 dsh plugin add。'
 }
-Link-Dir -Target (Join-Path $ScriptDir 'dsh-wechat-bridge') -Link (Join-Path $Shim 'dsh-wechat-bridge')
-Link-Dir -Target $BotDir -Link (Join-Path $ProfileNm 'dsh-wechat-bot')
-Write-Host '==> 已链接 dsh-wechat-bot（含依赖垫片）'
 
+New-Item -ItemType Directory -Force -Path $ProfileNm | Out-Null
+Link-Dir -Target $BotDir -Link (Join-Path $ProfileNm 'dsh-wechat-bot')
 Link-Dir -Target $UiDir -Link (Join-Path $ProfileNm 'dsh-client-wechat-ui')
-Write-Host '==> 已链接 dsh-client-wechat-ui'
+Link-Dir -Target $BridgeDir -Link (Join-Path $ProfileNm 'dsh-wechat-bridge')
+Write-Host '==> 已链接 profile node_modules 插件'
 
 $patchBlock = @"
-
 # 微信悬浮球桥接（dsh-wechat-bot + dsh-client-wechat-ui）
 # 由 install-wechat.ps1 添加；删除本段即可卸载。
 - insert:
@@ -94,15 +138,10 @@ $patchBlock = @"
       name: dsh-client-wechat-ui
 "@
 
-if ((Test-Path $PatchFile) -and (Select-String -Path $PatchFile -Pattern 'wechat-bot' -Quiet)) {
-    Write-Host "==> $PatchFile 已包含 wechat-bot，跳过注入"
-} else {
-    Add-Content -Path $PatchFile -Value $patchBlock -Encoding utf8
-    Write-Host "==> 已注入 patch 行到 $PatchFile"
-}
+Add-PatchBlock -PatchFile $PatchFile -Marker 'wechat-bot' -Block $patchBlock
 
 Write-Host ''
 Write-Host '安装完成。下一步：'
-Write-Host '  1. 重启 DeepSeek Harness 应用。'
+Write-Host '  1. 重启 DeepSeek Harness / DSH Desktop。'
 Write-Host '  2. 右下角出现微信绿色悬浮球 → 点击 → 用手机微信扫码登录。'
 Write-Host '  3. 微信消息直接进入 DSH 会话，回复自动回传微信。'

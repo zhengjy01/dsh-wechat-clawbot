@@ -32,7 +32,7 @@ dsh-client-wechat-ui ← 浏览器悬浮球（扫码/验证码/白名单/模型�
 | 依赖 | 要求 | 说明 |
 |---|---|---|
 | 操作系统 | **Windows / macOS / Linux** | 推荐 `dsh plugin add`；Windows 也可 `.\install-wechat.ps1` |
-| DeepSeek Harness | 已安装并运行过 `dsh web` | 需要存在 web profile（`$DSH_HOME/profiles/web/`） |
+| DeepSeek Harness | 已安装并运行过 **DSH Desktop** 或 `dsh web` | 需要存在 profile：Desktop 用 `desktop`，CLI Web 用 `web` |
 | Node.js | **>= 22.19**（建议 22.x 或 24.x LTS） | 与 DSH 引擎要求一致；网关与插件同标准 |
 | npm | 任意较新版本 | 安装 wechat-gateway 的 `qrcode` 依赖 |
 | 微信账号 | 一个可扫码的手机微信 | **建议小号**：个人微信自动化存在账号风控风险，请自行评估 |
@@ -50,6 +50,8 @@ dsh-client-wechat-ui ← 浏览器悬浮球（扫码/验证码/白名单/模型�
 
 `$DSH_HOME` 默认 **`~/.dsh`**（Windows：`C:\Users\<你>\.dsh`）；Mac 桌面 `.app` 可能是 `~/Library/Application Support/DeepSeekHarness`。可用环境变量 `DSH_HOME` 覆盖。
 
+**Windows DSH Desktop** 用户的 profile 通常是 `~/.dsh/profiles/desktop/`，不是 `web`。安装命令请带 `--profile desktop`。
+
 ## 📦 目录结构
 
 ```
@@ -63,6 +65,7 @@ DSH-WeChatClawBot/
 ├── install-wechat.sh     # 一键安装（软链方案，macOS/Linux/Git Bash）
 ├── install-wechat.ps1    # 一键安装（PowerShell，Windows 原生）
 ├── install-dsh-bridge.sh # 安装 HTTP 桥（可选，OpenClaw 转发方案用）
+├── scripts/              # prepare + peer 垫片（dsh plugin add 也会跑）
 └── README.md
 ```
 
@@ -79,13 +82,17 @@ DSH-WeChatClawBot/
 AI 会执行（等价于）：
 
 ```sh
+# DSH Desktop（Windows 官方桌面版常见）
+dsh plugin --profile desktop add github:lubaiUwU/DSH-WeChatClawBot
+
+# 源码 / CLI 跑起来的 Web GUI
 dsh plugin --profile web add github:lubaiUwU/DSH-WeChatClawBot
 ```
 
-pnpm ≥10 首次安装若提示 `allowBuilds`，在 profile 的 `pnpm-workspace.yaml` 加入后重跑：
+pnpm ≥10 首次安装若提示 `allowBuilds`，在对应 profile 的 `pnpm-workspace.yaml` 加入后重跑：
 
-- macOS/Linux：`$DSH_HOME/profiles/web/pnpm-workspace.yaml`
-- Windows：`%USERPROFILE%\.dsh\profiles\web\pnpm-workspace.yaml`（或你的 `$DSH_HOME` 路径）
+- DSH Desktop：`$DSH_HOME/profiles/desktop/pnpm-workspace.yaml`（Windows 多为 `%USERPROFILE%\.dsh\profiles\desktop\pnpm-workspace.yaml`）
+- CLI Web：`$DSH_HOME/profiles/web/pnpm-workspace.yaml`
 
 ```yaml
 allowBuilds:
@@ -109,7 +116,8 @@ bash install-wechat.sh
 ```powershell
 git clone https://github.com/lubaiUwU/DSH-WeChatClawBot
 cd DSH-WeChatClawBot
-.\install-wechat.ps1
+.\install-wechat.ps1                  # 自动选择 desktop 或 web
+.\install-wechat.ps1 -Profile desktop # 强制装进 DSH Desktop
 ```
 
 ### 手动安装（DSH 插件命令）
@@ -117,9 +125,10 @@ cd DSH-WeChatClawBot
 在仓库目录旁执行：
 
 ```sh
-dsh plugin --profile web add /path/to/DSH-WeChatClawBot
+dsh plugin --profile desktop add /path/to/DSH-WeChatClawBot
 # 或
-dsh plugin --profile web add github:lubaiUwU/DSH-WeChatClawBot
+dsh plugin --profile desktop add github:lubaiUwU/DSH-WeChatClawBot
+# CLI Web 则把 desktop 换成 web
 ```
 
 ### 一键脚本（本地 checkout）
@@ -146,11 +155,11 @@ curl http://127.0.0.1:51235/status
 ### 安装脚本做了什么
 
 1. `wechat-gateway/` 内 `npm install`（安装 `qrcode` 依赖）。
-2. 为 `dsh-wechat-bot` 建立 `node_modules/@deepseek-ai/*` 依赖垫片（软链到 DSH profile 的共享模块目录）——DSH 按真实路径解析插件，需要垫片才能找到 `@deepseek-ai/{cordis,schemastery,...}`。
-3. 把三个包软链进 `$DSH_HOME/profiles/web/node_modules/`。
-4. 在 `$DSH_HOME/profiles/web/cordis.patch.yml` 注入 `wechat-bot` / `wechat-ui` 两行（若已存在则跳过）。
+2. 为 **`dsh-wechat-bot` 和 `dsh-wechat-bridge`** 建立 `node_modules/@deepseek-ai/*` 依赖垫片（软链/junction 到 `$DSH_HOME/profiles/node_modules`）——DSH 按真实路径解析插件，两个包都需要垫片才能找到 `@deepseek-ai/{cordis,schemastery,...}`。`dsh plugin add` 会在 `prepare` / `postinstall` 里自动做这一步。
+3. 把插件软链进 `$DSH_HOME/profiles/<desktop|web>/node_modules/`。
+4. 在该 profile 的 `cordis.patch.yml` 注入 `wechat-bot` / `wechat-ui` 两行（若文件是空的 `[]` 则整文件替换，避免无效 YAML）。
 
-卸载：删掉 `cordis.patch.yml` 中对应段与 `profiles/web/node_modules/` 下三个软链，重启即可；`~/.dsh-wechat/` 删除即退出登录。
+卸载：删掉 `cordis.patch.yml` 中对应段与 `profiles/<name>/node_modules/` 下对应链接，重启即可；`~/.dsh-wechat/` 删除即退出登录。
 
 ## 📱 使用
 
@@ -161,7 +170,7 @@ curl http://127.0.0.1:51235/status
 
 ## ⚙️ 配置
 
-`$DSH_HOME/profiles/web/cordis.patch.yml`：
+`$DSH_HOME/profiles/<desktop|web>/cordis.patch.yml`：
 
 ```yaml
 - insert:
@@ -190,8 +199,9 @@ curl http://127.0.0.1:51235/status
 
 | 现象 | 处理 |
 |---|---|
-| 没有悬浮球 | 确认 `install-wechat.sh` 已跑且重启过应用；`curl http://127.0.0.1:51235/status` 是否有响应 |
-| 面板「无法连接网关」 | 网关没起来；看应用日志里 `wechat-gateway:` 前缀行；确认 51235 未被其他 DSH 实例占用 |
+| 没有悬浮球 | 确认已装进正在运行的那个 profile（Desktop 用 `desktop`，CLI 用 `web`）并重启过应用 |
+| **DSH Desktop 双击闪退** | 多为 `dsh-wechat-bridge` 找不到 `@deepseek-ai/schemastery`。更新到本仓库最新版后重装：`dsh plugin --profile desktop add github:lubaiUwU/DSH-WeChatClawBot`。临时：给 `dsh-wechat-bridge/node_modules/@deepseek-ai/` 建与 bot 相同的 junction 垫片 |
+| 面板「无法连接网关」 | 网关没起来。DSH Desktop（Electron）必须用 `ELECTRON_RUN_AS_NODE=1` 拉起网关（0.1.1 已内置）。检查 `netstat -ano \| findstr 51235` 是否 LISTENING；看日志 `wechat-gateway:` 行 |
 | 登录后重启又要扫码 | 正常情况会自动恢复；若出现「登录已失效」说明 token 被微信侧吊销，需重扫 |
 | 微信发消息没反应 | 面板确认状态为「已连接」；新联系人需先批准；日志看 `dsh-wechat-bot:` 行 |
 | 回复失败提示 | 登录态失效：面板解绑后重新扫码，或删 `~/.dsh-wechat/accounts/` |

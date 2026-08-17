@@ -71,6 +71,8 @@ export const Config = Schema.object({
     model: Schema.string(),
     reasoningEffort: Schema.string(),
   }),
+  /** Optional Node/Electron binary used to spawn wechat-gateway; empty = process.execPath. */
+  gatewayNode: Schema.string().default(''),
 })
 
 /** Resolve the gateway package directory (config value, sibling checkout, or pnpm dep). */
@@ -281,20 +283,30 @@ export function apply(ctx, config) {
     }
   }
 
+  /** Node binary for the gateway: config / DSH_NODE / current process (Electron needs ELECTRON_RUN_AS_NODE). */
+  const resolveGatewayNode = () => {
+    if (config.gatewayNode !== '') return config.gatewayNode
+    if (process.env.DSH_NODE) return process.env.DSH_NODE
+    return process.execPath
+  }
+
   /** Spawn (or respawn) the gateway subprocess. */
   const startGateway = () => {
     if (stopped) return
     if (child !== undefined && child.exitCode === null) return
     const entry = join(gatewayDir, 'gateway.mjs')
-    logger.info(`dsh-wechat-bot: starting gateway ${entry} (port ${config.gatewayPort})`)
-    child = spawn(process.execPath, [entry], {
+    const nodeBin = resolveGatewayNode()
+    logger.info(`dsh-wechat-bot: starting gateway ${entry} via ${nodeBin} (port ${config.gatewayPort})`)
+    child = spawn(nodeBin, [entry], {
       cwd: gatewayDir,
       env: {
         ...process.env,
+        ELECTRON_RUN_AS_NODE: '1',
         PORT: String(config.gatewayPort),
         ...(config.stateDir !== '' ? { STATE_DIR: config.stateDir } : {}),
       },
       stdio: ['ignore', 'pipe', 'pipe'],
+      windowsHide: true,
     })
     child.stdout?.setEncoding('utf8')
     child.stderr?.setEncoding('utf8')
