@@ -473,6 +473,11 @@ export function apply(ctx, config) {
       return json(500, { error: String(error.message ?? error) })
     }
   })
+  modelServer.on('error', (error) => {
+    // 端口被占（例如上一个实例没退干净）时不能让 'error' 事件冒泡：
+    // Server 上未处理的 error 会直接终结 DSH 宿主进程。
+    logger.warn(`dsh-wechat-bot: model endpoint (port ${config.modelPort}) unavailable: ${String(error)}`)
+  })
   modelServer.listen(config.modelPort, '127.0.0.1', () => {
     logger.info(`dsh-wechat-bot: model endpoint on http://127.0.0.1:${config.modelPort}`)
   })

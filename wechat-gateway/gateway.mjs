@@ -303,6 +303,8 @@ const state = {
   baseUrl: API_BASE,
   token: undefined,
   pendingVerifyCode: undefined,
+  /** 登录轮次：每次 startLogin 自增，已作废的旧轮次不得再改全局状态。 */
+  loginGen: 0,
   loginLoop: undefined,
   monitorAbort: undefined,
 }
@@ -325,6 +327,32 @@ function setPhase(phase, message = '') {
   log('info', `state -> ${phase}${message ? ` (${message})` : ''}`)
   broadcast('login/state', { phase, message, accountId: state.accountId })
 }
+/** 该登录轮次是否已被更新的轮次取代。 */
+function loginSuperseded(gen) {
+  return state.loginGen !== gen
+}
+/** 若本登录轮次已被取代则记一条 debug 并返回 true（调用方立即 return）。 */
+function bailIfSuperseded(gen) {
+  if (!loginSuperseded(gen)) return false
+  log('debug', `login loop gen ${gen} superseded — exiting`)
+  return true
+}
+/**
+ * setPhase，但仅当 gen 仍是当前登录轮次。
+ *
+ * 关键：被取代的旧循环（例如用户连点两次「刷新二维码」）不能再去改全局
+ * 状态。否则旧二维码过期时会把已经 logged_in 的状态改回 waiting_qrcode，
+ * 于是 /send 被判成「未登录」，DSH 生成好的回复全部发不出去——表现为
+ * 「微信里发消息没反应」，而收消息的 monitor 其实一直活着。
+ */
+function setPhaseCurrent(gen, phase, message = '') {
+  if (loginSuperseded(gen)) {
+    log('info', `stale login loop (gen ${gen}) ignored: state -> ${phase}`)
+    return false
+  }
+  setPhase(phase, message)
+  return true
+}
 
 // ── QR login loop ──────────────────────────────────────────────────────────
 async function startLogin({ force } = {}) {
@@ -338,9 +366,12 @@ async function startLogin({ force } = {}) {
     state.monitorAbort.abort()
     state.monitorAbort = undefined
   }
-  state.loginLoop = (async () => {
+  // 递增登录轮次：此前仍在轮询的登录循环自此刻起作废，只能安静退出。
+  const gen = ++state.loginGen
+  const loop = (async () => {
     try {
       const qr = await fetchQRCode()
+      if (bailIfSuperseded(gen)) return
       if (!qr.qrcode || !qr.qrcode_img_content) {
         throw new Error(`QR fetch failed: ${JSON.stringify(qr).slice(0, 200)}`)
       }
@@ -348,48 +379,53 @@ async function startLogin({ force } = {}) {
       state.qrcodeUrl = qr.qrcode_img_content
       state.qrcodeDataUrl = await QRCode.toDataURL(qr.qrcode_img_content, { margin: 1 })
       state.pendingVerifyCode = undefined
-      setPhase('waiting_qrcode', '请用手机微信扫描二维码')
+      setPhaseCurrent(gen, 'waiting_qrcode', '请用手机微信扫描二维码')
       const deadline = Date.now() + 480_000
       let qrRefreshes = 0
       while (Date.now() < deadline) {
+        if (bailIfSuperseded(gen)) return
         const resp = await pollQRStatus(
           state.qrcode,
           state.pendingVerifyCode,
           state.baseUrl === API_BASE ? API_BASE : state.baseUrl,
         )
+        if (bailIfSuperseded(gen)) return
         switch (resp.status) {
           case 'wait':
             break
           case 'scaned':
             state.pendingVerifyCode = undefined
-            setPhase('scanned', '已扫码，请在手机上确认')
+            setPhaseCurrent(gen, 'scanned', '已扫码，请在手机上确认')
             break
           case 'need_verifycode':
-            setPhase('need_verifycode', '请在手机上查看验证码并输入')
+            setPhaseCurrent(gen, 'need_verifycode', '请在手机上查看验证码并输入')
             // wait for POST /verifycode; poll again after a short pause
             await new Promise((r) => setTimeout(r, 2000))
             break
           case 'expired':
-          case 'verify_code_blocked':
+          case 'verify_code_blocked': {
             qrRefreshes += 1
             if (qrRefreshes >= 3) {
-              setPhase('error', '二维码多次失效，请重新登录')
+              setPhaseCurrent(gen, 'error', '二维码多次失效，请重新登录')
               return
             }
             const fresh = await fetchQRCode()
+            if (bailIfSuperseded(gen)) return
             state.qrcode = fresh.qrcode
             state.qrcodeUrl = fresh.qrcode_img_content
             state.qrcodeDataUrl = await QRCode.toDataURL(fresh.qrcode_img_content, { margin: 1 })
             state.pendingVerifyCode = undefined
-            setPhase('waiting_qrcode', '二维码已刷新，请重新扫描')
+            setPhaseCurrent(gen, 'waiting_qrcode', '二维码已刷新，请重新扫描')
             break
+          }
           case 'binded_redirect':
-            setPhase('expired', '该微信已绑定过，请刷新二维码')
+            setPhaseCurrent(gen, 'expired', '该微信已绑定过，请刷新二维码')
             break
           case 'scaned_but_redirect':
             if (resp.redirect_host) state.baseUrl = `https://${resp.redirect_host}`
             break
           case 'confirmed': {
+            if (bailIfSuperseded(gen)) return
             if (!resp.ilink_bot_id) throw new Error('login confirmed but missing ilink_bot_id')
             state.token = resp.bot_token
             state.accountId = resp.ilink_bot_id
@@ -403,7 +439,7 @@ async function startLogin({ force } = {}) {
             state.qrcode = undefined
             state.qrcodeUrl = undefined
             state.qrcodeDataUrl = undefined
-            setPhase('logged_in', '已连接微信')
+            setPhaseCurrent(gen, 'logged_in', '已连接微信')
             startMonitor()
             return
           }
@@ -412,13 +448,14 @@ async function startLogin({ force } = {}) {
         }
         await new Promise((r) => setTimeout(r, 1000))
       }
-      setPhase('expired', '二维码已过期，请重新登录')
+      setPhaseCurrent(gen, 'expired', '二维码已过期，请重新登录')
     } catch (error) {
-      setPhase('error', String(error.message ?? error))
+      setPhaseCurrent(gen, 'error', String(error.message ?? error))
     } finally {
-      state.loginLoop = undefined
+      if (state.loginLoop === loop) state.loginLoop = undefined
     }
   })()
+  state.loginLoop = loop
   return { ok: true }
 }
 
@@ -652,7 +689,10 @@ const server = createServer(async (req, res) => {
       const to = typeof body.to === 'string' ? body.to : ''
       const text = typeof body.text === 'string' ? body.text : ''
       if (!to || !text) return json(res, 400, { error: 'missing to/text' })
-      if (state.phase !== 'logged_in' || !state.token) {
+      // 只要还持有有效凭证就允许发送：登录轮次切换 / 二维码刷新期间 phase
+      // 可能被短暂改写，此时绝不能把 DSH 已经生成好的回复丢掉（否则表现
+      // 为「微信发消息没反应」）。
+      if (!state.token) {
         return json(res, 409, { error: 'not logged in' })
       }
       try {
