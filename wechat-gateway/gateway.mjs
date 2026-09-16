@@ -141,6 +141,45 @@ function setAllowed(wxid, allow) {
   return list
 }
 
+// ── conversation context (context_token) ───────────────────────────────────
+// iLink's sendmessage needs an "open" conversation context; without one Tencent
+// answers `{"ret":-2,"errmsg":"prepare failed"}` even though the bot is logged
+// in and getUpdates works fine. Every inbound message carries a `context_token`
+// for its sender — the gateway only forwarded it on the auto-reply path and
+// dropped it otherwise, so any *proactive* push (daily report, notifications,
+// task-dispatcher) went out without one and started failing as soon as the last
+// user interaction went stale.
+//
+// Fix: remember the latest context_token per sender and reuse it for outbound
+// sends that don't supply one. Callers may still override via `contextToken`.
+const CONTEXT_TOKEN_KEEP = 50
+const contextTokensPath = () => path.join(stateDir(), 'context-tokens.json')
+
+function loadContextTokens() {
+  const store = readJson(contextTokensPath(), {})
+  return store && typeof store === 'object' && !Array.isArray(store) ? store : {}
+}
+function loadContextToken(wxid) {
+  if (!wxid) return ''
+  const rec = loadContextTokens()[wxid]
+  return rec && typeof rec === 'object' && typeof rec.token === 'string' ? rec.token : ''
+}
+function saveContextToken(wxid, token) {
+  if (!wxid || typeof token !== 'string' || token.trim() === '') return
+  const store = loadContextTokens()
+  const prev = store[wxid]
+  if (prev && typeof prev === 'object' && prev.token === token) return // unchanged: skip the write
+  store[wxid] = { token: token.trim(), updatedAt: new Date().toISOString() }
+  const entries = Object.entries(store)
+  if (entries.length > CONTEXT_TOKEN_KEEP) {
+    entries
+      .sort((a, b) => String(a[1]?.updatedAt ?? '').localeCompare(String(b[1]?.updatedAt ?? '')))
+      .slice(0, entries.length - CONTEXT_TOKEN_KEEP)
+      .forEach(([k]) => delete store[k])
+  }
+  writeJson(contextTokensPath(), store)
+}
+
 // ── iLink protocol core (from @tencent-weixin/openclaw-weixin, MIT) ────────
 function randomWechatUin() {
   const uint32 = randomBytes(4).readUInt32BE(0)
@@ -514,6 +553,9 @@ async function startMonitor() {
         const text = extractText(full.item_list)
         const contextToken = full.context_token ?? undefined
         if (!from) continue
+        // Remember this sender's freshest conversation context so proactive
+        // outbound pushes (no inbound message to reply to) can still be sent.
+        if (contextToken) saveContextToken(from, contextToken)
         if (!isAllowed(from)) {
           broadcast('approval', { wxid: from, text: text.slice(0, 200), ts: Date.now() })
           if (text) {
@@ -695,6 +737,10 @@ const server = createServer(async (req, res) => {
       if (!state.token) {
         return json(res, 409, { error: 'not logged in' })
       }
+      // Reuse the last inbound context_token for this recipient unless the
+      // caller supplied one — without it Tencent rejects proactive sends with
+      // ret=-2 "prepare failed" (see the context-token helpers above).
+      const effectiveContextToken = body.contextToken || loadContextToken(to)
       try {
         await sendMessage({
           baseUrl: state.baseUrl,
@@ -707,7 +753,7 @@ const server = createServer(async (req, res) => {
               message_type: 2,
               message_state: 2,
               item_list: [{ type: 1, text_item: { text } }],
-              ...(body.contextToken ? { context_token: body.contextToken } : {}),
+              ...(effectiveContextToken ? { context_token: effectiveContextToken } : {}),
             },
           },
         })
