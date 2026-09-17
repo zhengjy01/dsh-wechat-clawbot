@@ -1,9 +1,14 @@
 {
   "name": "dsh-wechat-clawbot",
-  "version": "0.1.1",
-  "description": "DSH bundle: WeChat floating-ball bridge (QR login, message relay, ClawBot model config)",
+  "version": "0.1.2",
+  "description": "DSH bundle: WeChat floating-ball bridge (QR login, message relay, ClawBot model config) — maintained fork of lubaiUwU/DSH-WeChatClawBot",
   "type": "module",
   "main": "index.js",
+  "exports": {
+    ".": "./index.js",
+    "./client": "./dsh-client-wechat-ui/client.js",
+    "./package.json": "./package.json"
+  },
   "files": [
     "index.js",
     "cordis.patch.yml",
@@ -17,23 +22,26 @@
     "scripts/lib.sh",
     "scripts/prepare.mjs",
     "scripts/link-peer-shims.mjs",
+    "scripts/portability.mjs",
+    "PORTABILITY-SOP.md",
     "README.md",
     "LICENSE"
   ],
   "scripts": {
-    "prepare": "node scripts/prepare.mjs",
-    "postinstall": "node scripts/link-peer-shims.mjs"
+    "verify": "node scripts/portability.mjs --health /api/dsh-wechat-bot/probe",
+    "verify:full": "node scripts/portability.mjs --health /api/dsh-wechat-bot/probe --stability 30",
+    "verify:quick": "node scripts/portability.mjs --skip-audit --stability 5 --health /api/dsh-wechat-bot/probe"
   },
   "dsh": {
     "bundle": {
       "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web"
     }
   },
   "dependencies": {
-    "dsh-wechat-bot": "file:./dsh-wechat-bot",
-    "dsh-client-wechat-ui": "file:./dsh-client-wechat-ui",
-    "dsh-wechat-bridge": "file:./dsh-wechat-bridge",
-    "wechat-gateway": "file:./wechat-gateway"
+    "qrcode": "^1.5.4"
   },
   "keywords": [
     "dsh-plugin",
@@ -43,6 +51,10 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "https://github.com/lubaiUwU/DSH-WeChatClawBot.git"
+    "url": "https://github.com/zhengjy01/dsh-wechat-clawbot.git"
+  },
+  "homepage": "https://github.com/zhengjy01/dsh-wechat-clawbot",
+  "bugs": {
+    "url": "https://github.com/zhengjy01/dsh-wechat-clawbot/issues"
   }
 }

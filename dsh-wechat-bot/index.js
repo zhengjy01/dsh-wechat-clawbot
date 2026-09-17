@@ -26,20 +26,27 @@ import { fileURLToPath } from 'node:url'
 import { dirname, join, isAbsolute } from 'node:path'
 import Schema from '@deepseek-ai/schemastery'
 import { settingsNamespace } from '@deepseek-ai/dsh-settings'
-import { createBridge } from 'dsh-wechat-bridge'
+import { createBridge } from '../dsh-wechat-bridge/index.js'
 
 export const name = 'dsh-wechat-bot'
 /** The agent registry is accessed through createBridge; declare it for this fiber. */
 export const inject = ['agents']
 
+/** Read a positive integer from an environment variable, else the fallback. */
+function envPort(name, fallback) {
+  const raw = process.env[name]
+  const value = raw === undefined || raw === '' ? Number.NaN : Number(raw)
+  return Number.isInteger(value) && value > 0 && value < 65536 ? value : fallback
+}
+
 /** Plugin config, validated by schemastery at mount time. */
 export const Config = Schema.object({
-  /** Gateway HTTP port. */
-  gatewayPort: Schema.number().default(51235),
+  /** Gateway HTTP port. Env override: DSH_WECHAT_GATEWAY_PORT. */
+  gatewayPort: Schema.number().default(envPort('DSH_WECHAT_GATEWAY_PORT', 51235)),
   /** Directory containing the wechat-gateway package (gateway.mjs). */
   gatewayDir: Schema.string().default(''),
-  /** Gateway state dir (accounts/allowlist); empty = ~/.dsh-wechat. */
-  stateDir: Schema.string().default(''),
+  /** Gateway state dir (accounts/allowlist); empty = ~/.dsh-wechat. Env override: DSH_WECHAT_STATE_DIR. */
+  stateDir: Schema.string().default(process.env.DSH_WECHAT_STATE_DIR ?? ''),
   /** Which session inbound messages target: active | dedicated | keyed | explicit. */
   sessionMode: Schema.union([
     Schema.const('active'),
@@ -63,8 +70,8 @@ export const Config = Schema.object({
   model: Schema.string(),
   /** Restart the gateway after this many consecutive failed health checks (0 = never). */
   healthCheckLimit: Schema.number().default(5),
-  /** HTTP port for the ClawBot model-management endpoint (GET/POST /model). */
-  modelPort: Schema.number().default(51236),
+  /** HTTP port for the ClawBot model-management endpoint (GET/POST /model). Env override: DSH_WECHAT_MODEL_PORT. */
+  modelPort: Schema.number().default(envPort('DSH_WECHAT_MODEL_PORT', 51236)),
   /** Optional initial ClawBot model override: { provider, model, reasoningEffort? }. */
   modelOverride: Schema.object({
     provider: Schema.string(),
@@ -481,6 +488,39 @@ export function apply(ctx, config) {
   modelServer.listen(config.modelPort, '127.0.0.1', () => {
     logger.info(`dsh-wechat-bot: model endpoint on http://127.0.0.1:${config.modelPort}`)
   })
+
+  // ── Host liveness probe ──────────────────────────────────────────────
+  // GET /api/dsh-wechat-bot/probe — read-only; proves this host plugin really
+  // mounted on the DSH web server. Added by zhengjy01 for the release-kit
+  // portability gate (AGENTS.md §10) and any external watcher.
+  //
+  // The web server may not exist yet when apply() runs, so wait for it with a
+  // scoped inject instead of a required `inject` entry: headless profiles stay
+  // usable (no web server) while web profiles get the probe.
+  const registerProbe = (webCtx) => {
+    webCtx.effect(
+      () => webCtx.webServer.register({
+        kind: 'exact',
+        path: '/api/dsh-wechat-bot/probe',
+        handler: (req, res) => {
+          const payload = JSON.stringify({
+            ok: true,
+            plugin: name,
+            gatewayPort: config.gatewayPort,
+            modelPort: config.modelPort,
+          })
+          res.writeHead(200, {
+            'content-type': 'application/json; charset=utf-8',
+            'cache-control': 'no-store',
+          })
+          res.end(payload)
+        },
+      }),
+      'dsh-wechat-bot.probe',
+    )
+  }
+  if (typeof ctx.inject === 'function') ctx.inject(['webServer'], registerProbe)
+  else logger.warn('dsh-wechat-bot: ctx.inject unavailable — /api/dsh-wechat-bot/probe not registered')
 
   ctx.effect(
     () => () => {

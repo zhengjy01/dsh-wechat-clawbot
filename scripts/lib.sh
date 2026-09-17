@@ -97,7 +97,7 @@ link_dir() {
 
   echo "错误: 无法创建链接 $link -> $target" >&2
   echo "  macOS/Linux: 确认有写权限。" >&2
-  echo "  Windows: 开启「开发者模式」，或改用: dsh plugin --profile desktop add github:lubaiUwU/DSH-WeChatClawBot" >&2
+  echo "  Windows: 开启「开发者模式」，或改用: dsh plugin --profile desktop add github:zhengjy01/dsh-wechat-clawbot" >&2
   return 1
 }
 

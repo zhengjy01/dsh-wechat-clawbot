@@ -1,7 +1,9 @@
 # install-wechat.ps1 — Windows PowerShell 安装脚本（与 install-wechat.sh 等价）
 # 用法:  .\install-wechat.ps1
 #        .\install-wechat.ps1 -Profile desktop
-# 推荐:  dsh plugin --profile desktop add github:lubaiUwU/DSH-WeChatClawBot
+# 推荐（公开发布路径，也是本机切换后的挂载方式）：
+#   dsh plugin --profile desktop add github:zhengjy01/dsh-wechat-clawbot
+# 本脚本是「本地 checkout 开发模式」的替代方案（junction 整个仓库，改代码即时生效）。
 param(
     [string]$Profile = $env:DSH_PROFILE
 )
@@ -10,9 +12,6 @@ $ErrorActionPreference = 'Stop'
 
 $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $GatewayDir = Join-Path $ScriptDir 'wechat-gateway'
-$BotDir = Join-Path $ScriptDir 'dsh-wechat-bot'
-$UiDir = Join-Path $ScriptDir 'dsh-client-wechat-ui'
-$BridgeDir = Join-Path $ScriptDir 'dsh-wechat-bridge'
 
 function Resolve-DshHome {
     if ($env:DSH_HOME -and $env:DSH_HOME.Trim()) {
@@ -117,25 +116,20 @@ if (Get-Command node -ErrorAction SilentlyContinue) {
 }
 
 New-Item -ItemType Directory -Force -Path $ProfileNm | Out-Null
-Link-Dir -Target $BotDir -Link (Join-Path $ProfileNm 'dsh-wechat-bot')
-Link-Dir -Target $UiDir -Link (Join-Path $ProfileNm 'dsh-client-wechat-ui')
-Link-Dir -Target $BridgeDir -Link (Join-Path $ProfileNm 'dsh-wechat-bridge')
-Write-Host '==> 已链接 profile node_modules 插件'
+Link-Dir -Target $ScriptDir -Link (Join-Path $ProfileNm 'dsh-wechat-clawbot')
+Write-Host '==> 已链接 profile node_modules/dsh-wechat-clawbot（宿主 + 悬浮球同一包）'
 
 $patchBlock = @"
-# 微信悬浮球桥接（dsh-wechat-bot + dsh-client-wechat-ui）
+# 微信悬浮球桥接（dsh-wechat-clawbot bundle：宿主 + 悬浮球同包）
 # 由 install-wechat.ps1 添加；删除本段即可卸载。
 - insert:
     - id: wechat-bot
-      name: dsh-wechat-bot
+      name: dsh-wechat-clawbot
       config:
-        gatewayPort: 51235
         sessionMode: active
         timeoutMs: 300000
         maxMessageChars: 20000
         approval: reject
-    - id: wechat-ui
-      name: dsh-client-wechat-ui
 "@
 
 Add-PatchBlock -PatchFile $PatchFile -Marker 'wechat-bot' -Block $patchBlock

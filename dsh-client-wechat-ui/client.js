@@ -1,14 +1,16 @@
 /*!
- * dsh-client-wechat-ui — browser half of the WeChat bridge for DeepSeek
+ * dsh-wechat-clawbot — browser half of the WeChat bridge for DeepSeek
  * Harness. A floating ball (bottom-right) opens a panel that shows the
  * WeChat QR code, collects the on-phone verification code, manages sender
  * approvals, and logs recent messages. Talks directly to the local
  * wechat-gateway service (default http://127.0.0.1:51235).
  *
+ * Registered under the bundle package name (dsh-wechat-clawbot) so the
+ * client-modules host half can serve this file as <package>/client.js.
  * Zero-dependency bundle: pure DOM, no React, no RPC services.
  */
 window.__ModuleLoader__.load({
-	id: "dsh-client-wechat-ui",
+	id: "dsh-wechat-clawbot",
 	factory: (require) => {
 		var module = { exports: {} };
 		var exports = module.exports;
