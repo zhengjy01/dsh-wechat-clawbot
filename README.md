@@ -1,253 +1,209 @@
-# dsh-wechat-clawbot — 微信悬浮球扫码桥接
+# dsh-wechat-clawbot — WeChat floating-ball bridge for DeepSeek Harness
 
-> **本仓库（独立维护）**：[`zhengjy01/dsh-wechat-clawbot`](https://github.com/zhengjy01/dsh-wechat-clawbot) — 非 GitHub fork 关系，独立仓库。
-> **上游来源**：[`lubaiUwU/DSH-WeChatClawBot`](https://github.com/lubaiUwU/DSH-WeChatClawBot)，MIT License，Copyright (c) 2026 lubai。
-> **本仓库相对上游的改动**：见文末 [「本仓库的改动」](#本仓库的改动)。上游最后提交 2026-08-17、维护者最后活动 08-18；本仓库接手维护并带上两个本地修复。
+[中文文档](README.zh.md) | **English**
 
-**安装（用户只需这一句）：** 对 DSH 说 `请帮我安装插件 https://github.com/zhengjy01/dsh-wechat-clawbot`  
-Windows / macOS / Linux、DSH Desktop 与 CLI 都适用。profile、依赖、悬浮球注册由安装方按下方「给安装 Agent 的步骤」自动处理，用户不用额外交代。
+> **This repository (independently maintained):** [`zhengjy01/dsh-wechat-clawbot`](https://github.com/zhengjy01/dsh-wechat-clawbot) — a standalone repository, *not* a GitHub fork.
+> **Upstream:** [`lubaiUwU/DSH-WeChatClawBot`](https://github.com/lubaiUwU/DSH-WeChatClawBot), MIT License, Copyright (c) 2026 lubai. Upstream's last commit was 2026-08-17 and its maintainer has been inactive since 2026-08-18; this repository carries the maintenance forward, including two local fixes.
+> **Changes vs. upstream:** see [Changes in this repository](#changes-in-this-repository).
 
-给 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness)（`dsh`）装一个插件后，GUI 右下角出现**微信绿色悬浮球**：点开 → 手机微信扫码登录 → 之后微信里发给你的消息**直接进入独立的微信对话区**（不会混进 GUI 会话），由 DSH 的 agent 处理，回复自动回传微信。
+**Install (the only thing a user needs to say):** tell DSH `install the plugin https://github.com/zhengjy01/dsh-wechat-clawbot`.
+Works on Windows / macOS / Linux, with DSH Desktop and the `dsh` CLI alike. The installing agent handles the profile, dependencies and floating-ball registration (see [For the installing agent](#for-the-installing-agent)).
 
-不需要 OpenClaw、不需要任何外部服务。微信接入使用腾讯官方渠道协议（iLink，与 `@tencent-weixin/openclaw-weixin` 同源，MIT 许可），本项目把协议核心抽成了独立网关服务。
+Once installed, a **green WeChat floating ball** appears in the DSH GUI's bottom-right corner: click it, scan the QR code with your phone, and messages sent to that WeChat account flow into a **dedicated WeChat conversation area** (they never mix with your GUI session). Replies are sent back to WeChat automatically.
+
+No OpenClaw and no external service is required. WeChat access uses Tencent's official channel protocol (iLink, the same lineage as `@tencent-weixin/openclaw-weixin`, MIT); the protocol core is extracted into a standalone gateway service.
 
 ```
-微信 (手机)
-   │ 扫码登录（悬浮球面板展示二维码）
+WeChat (phone)
+   │ QR login (the floating-ball panel shows the code)
    ▼
-wechat-gateway      ← 独立 Node 服务（腾讯 iLink 协议：收/发消息，端口 51235）
-   │  SSE message 事件
+wechat-gateway        ← standalone Node service (iLink: receive/send, port 51235)
+   │  SSE "message" events
    ▼
-dsh-wechat-bot      ← DSH 宿主插件（spawn/守护网关、注入会话、回复回传）
-   │  createBridge（会话驱动核心，复用 dsh-wechat-bridge）
+dsh-wechat-bot        ← DSH host plugin (spawns/supervises the gateway, injects sessions, sends replies)
+   │  createBridge (session driver, shared with dsh-wechat-bridge)
    ▼
-DSH agent（独立微信对话区；上下文长期保留）
+DSH agent (dedicated WeChat conversation area; context is kept long-term)
    ▲
-dsh-client-wechat-ui ← 浏览器悬浮球（扫码/验证码/白名单/模型配置/新对话）
+   └── replies go back through the gateway → WeChat
 ```
 
-> **安装形态**：宿主与悬浮球由**同一个 npm 包**（`dsh-wechat-clawbot`）承载——`index.js` 是宿主入口（转出 `dsh-wechat-bot`），`dsh.client` + `exports["./client"]` 指向悬浮球 bundle（`dsh-client-wechat-ui/client.js`）。内部目录仍是原来的三个模块，但**不再互相声明 `file:` 子包依赖**（pnpm 安装 tarball / git 依赖时无法解析那种依赖，会直接装不上）。
+## ✨ Features
 
-## ✨ 功能特性
+- **Scan and go** — bind by scanning the floating-ball QR code with your phone. Credentials stay on the machine and **DSH reuses them after a restart** (only a revoked token needs a re-scan).
+- **Dedicated conversation area** — WeChat messages never enter your GUI session; the conversation keeps continuous context and **history is restored after a restart** (persisted sessions + conversation mapping).
+- **Explicit new-conversation command** — send `/new` in WeChat (or `/新对话` / `/新会话`), or press "New conversation" in the panel. Otherwise the same conversation is always reused.
+- **ClawBot-specific model** — pick a model and thinking effort (off/high/max) in the panel; it persists across restarts and applies **only to WeChat turns**.
+- **Contact allowlist** — allow everyone by default; approve or ignore new contacts from the panel.
 
-- **扫码即用**：手机微信扫悬浮球二维码绑定；登录凭证存本机，**重启 DSH 自动恢复登录**（token 失效才需重扫）
-- **独立对话区**：微信消息绝不进入 GUI 会话；对话区上下文连续，**重启后自动恢复历史**（持久化会话 + 会话映射）
-- **按命令切换对话**：微信发 `/new`（或 `/新对话`、`/新会话`）、悬浮球点「新对话」才新建对话区；默认永远沿用同一对话
-- **ClawBot 专用模型**：面板配置模型（快捷选择已配密钥的模型 / 自定义填写）+ 思考强度（off/high/max），重启后保留，只对微信回合生效
-- **联系人白名单**：默认允许所有；可在面板批准/忽略新联系人
+## 🖥️ Requirements
 
-## 🖥️ 环境要求
-
-| 依赖 | 要求 | 说明 |
+| Dependency | Requirement | Notes |
 |---|---|---|
-| 操作系统 | **Windows / macOS / Linux** | 推荐 `dsh plugin add`；Windows 也可 `.\install-wechat.ps1` |
-| DeepSeek Harness | 已安装 DSH Desktop 或能跑 `dsh` | 用户只需说「请帮我安装插件」+ 本仓库 URL；profile 由安装方自动检测 |
-| Node.js | **>= 22.19**（建议 22.x 或 24.x LTS） | 与 DSH 引擎要求一致；网关与插件同标准 |
-| npm / pnpm | 任意较新版本 | `dsh plugin add` 用 profile 自带的 pnpm；唯一外部依赖是 `qrcode` |
-| 微信账号 | 一个可扫码的手机微信 | **建议小号**：个人微信自动化存在账号风控风险，请自行评估 |
-| 模型密钥 | 可选 | 在 DSH 设置（Models 页）配置密钥即可；快捷选择模型时会自动检测密钥状态 |
-| 可用端口 | 51234 / 51235 / 51236 | 均为本机回环 `127.0.0.1` 监听，一般不会冲突 |
+| OS | **Windows / macOS / Linux** | `dsh plugin add` is recommended; Windows can also use `.\install-wechat.ps1` |
+| DeepSeek Harness | DSH Desktop installed, or a working `dsh` command | The installing agent detects the profile |
+| Node.js | **>= 22.19** (22.x or 24.x LTS recommended) | Matches the DSH engine requirement |
+| npm / pnpm | Any recent version | `dsh plugin add` uses the profile's own pnpm; the only runtime dependency is `qrcode` |
+| WeChat account | A phone WeChat that can scan QR codes | **A secondary account is recommended** — automating a personal WeChat account carries a ban/risk-control risk; judge for yourself |
+| Model key | Optional | Configure it on DSH's Models page; the quick-pick list detects key availability |
+| Ports | 51234 / 51235 / 51236 | All bound to loopback `127.0.0.1`; conflicts are rare |
 
-### 端口与数据目录
+### Ports and state directory
 
-| 项 | 值 | 用途 |
+| Item | Value | Purpose |
 |---|---|---|
-| `127.0.0.1:51234` | dsh-wechat-bridge HTTP 桥 | 调试 / OpenClaw 转发方案 |
-| `127.0.0.1:51235` | wechat-gateway | 微信协议收/发、扫码登录、SSE 事件 |
-| `127.0.0.1:51236` | dsh-wechat-bot 模型端点 | 悬浮球读写「ClawBot 使用模型」配置 |
-| `~/.dsh-wechat/` | 状态目录 | 登录凭证、白名单、模型配置（`clawbot-model.json`）、会话映射（`bridge-sessions.json`）、对话区编号（`wechat-session.json`）、主动推送上下文（`context-tokens.json`） |
+| `127.0.0.1:51234` | dsh-wechat-bridge HTTP bridge | Debugging / OpenClaw forwarding |
+| `127.0.0.1:51235` | wechat-gateway | WeChat protocol send/receive, QR login, SSE events |
+| `127.0.0.1:51236` | dsh-wechat-bot model endpoint | The floating ball reads/writes the "ClawBot model" configuration |
+| `~/.dsh-wechat/` | State directory | Credentials, allowlist, model config (`clawbot-model.json`), session mapping (`bridge-sessions.json`), conversation index (`wechat-session.json`), and proactive-push context (`context-tokens.json`) |
 
-`$DSH_HOME` 默认 **`~/.dsh`**（Windows：`C:\Users\<你>\.dsh`）；Mac 桌面 `.app` 可能是 `~/Library/Application Support/DeepSeekHarness`。可用环境变量 `DSH_HOME` 覆盖。DSH Desktop 的 profile 一般叫 `desktop`，CLI Web 一般叫 `web`（安装 Agent 会自动选，用户不用记）。
+`$DSH_HOME` defaults to **`~/.dsh`** (Windows: `C:\Users\<you>\.dsh`); on macOS the desktop `.app` may use `~/Library/Application Support/DeepSeekHarness`. Override it with the `DSH_HOME` environment variable. A DSH Desktop profile is usually named `desktop` and the CLI Web profile `web` — the installing agent picks automatically.
 
-## 📦 目录结构
+## 📦 Repository layout
 
 ```
 dsh-wechat-clawbot/
-├── package.json          # 单一组合包 manifest（dsh.bundle → cordis.patch.yml；dsh.client → 悬浮球）
-├── index.js              # 宿主入口：转出 ./dsh-wechat-bot（让整包只有一个安装单元）
-├── cordis.patch.yml      # 注入 wechat-bot 一行（宿主；悬浮球由 dsh.client 自动注册）
-├── wechat-gateway/       # 微信网关（gateway.mjs，Node 内置 fetch，依赖 qrcode）
-├── dsh-wechat-bot/       # 宿主插件实现（管理网关进程、会话注入、模型端点、/probe）
-├── dsh-client-wechat-ui/ # 浏览器悬浮球 bundle（client.js，零依赖）
-├── dsh-wechat-bridge/    # 会话驱动核心（createBridge + 可选 HTTP 桥 + 单元测试）
-├── install-wechat.sh     # 本地 checkout 安装（软链整仓，macOS/Linux/Git Bash）
-├── install-wechat.ps1    # 本地 checkout 安装（junction 整仓，Windows 原生）
-├── install-dsh-bridge.sh # 安装 HTTP 桥（可选，OpenClaw 转发方案用）
-├── scripts/              # peer 垫片（软链开发用）+ 可移植性验证
-├── PORTABILITY-SOP.md    # 可移植性验证 SOP（发布前门禁，AGENTS.md 第 10 节）
-└── README.md
+├── package.json          # single bundle manifest (dsh.bundle → cordis.patch.yml; dsh.client → floating ball)
+├── index.js              # host entry: re-exports ./dsh-wechat-bot (one installable unit)
+├── cordis.patch.yml      # injects the wechat-bot row (host; the client half self-registers via dsh.client)
+├── wechat-gateway/       # WeChat gateway (gateway.mjs, Node built-in fetch, depends on qrcode)
+├── dsh-wechat-bot/       # host plugin (supervises the gateway, session injection, model endpoint, /probe)
+├── dsh-client-wechat-ui/ # browser floating-ball bundle (client.js, zero dependencies)
+├── dsh-wechat-bridge/    # session-driver core (createBridge + optional HTTP bridge + unit tests)
+├── install-wechat.sh     # local-checkout install (symlinks the repo, macOS/Linux/Git Bash)
+├── install-wechat.ps1    # local-checkout install (junction, native Windows)
+├── scripts/              # peer shims (symlink dev mode) + portability verification
+├── PORTABILITY-SOP.md    # portability-verification SOP (pre-release gate)
+└── README.md / README.zh.md
 ```
 
-## 🚀 安装
+## 🚀 Install
 
-用户只需对 DSH 说这一句（不必提 Windows、desktop）：
+The user only needs to tell DSH one sentence:
 
 ```
-请帮我安装插件 https://github.com/zhengjy01/dsh-wechat-clawbot
+install the plugin https://github.com/zhengjy01/dsh-wechat-clawbot
 ```
 
-下面整节是给**正在执行安装的 AI / Agent**看的。用户不用说这些；你读完后自己做完，不要再追问用户选 profile。
+Everything below is for the **installing AI / agent**. Read it and finish the job yourself; do not ask the user to choose a profile.
 
-### 给安装 Agent 的步骤（必须按顺序做完）
+### For the installing agent
 
-1. **自动选定 profile，不要默认 web。**  
-   `$DSH_HOME` 一般为 `~/.dsh`（Windows：`%USERPROFILE%\.dsh`）。按下面优先级选一个已存在的目录名：
-   - `$DSH_HOME/profiles/desktop` 存在 → 用 **`desktop`**（DSH Desktop / Windows 官方桌面版几乎都是这个）
-   - 否则 `$DSH_HOME/profiles/web` 存在 → 用 **`web`**
-   - 否则看 `$DSH_HOME/profiles/` 下实际有哪个，用那个  
-   记作 `<profile>`。
+1. **Pick the profile automatically — do not default to `web`.**
+   `$DSH_HOME` is normally `~/.dsh` (Windows: `%USERPROFILE%\.dsh`). Choose the first existing directory name in this order:
+   - `$DSH_HOME/profiles/desktop` exists → use **`desktop`** (DSH Desktop / the official Windows desktop build is almost always this)
+   - otherwise `$DSH_HOME/profiles/web` exists → use **`web`**
+   - otherwise use whichever directory actually exists under `$DSH_HOME/profiles/`
 
-2. **安装组合包：**
+   Call it `<profile>`.
+
+2. **Install the bundle:**
 
    ```sh
    dsh plugin --profile <profile> add github:zhengjy01/dsh-wechat-clawbot
    ```
 
-   本包**没有** `prepare` / `postinstall` 构建脚本（宿主 + 悬浮球同包、`qrcode` 是普通依赖），所以 pnpm ≥10 的 `allowBuilds` 不会拦它；安装成功即进入 profile 的 `dsh.profile.bundles`。
+   This package has **no** `prepare` / `postinstall` build scripts (host + client ship together and `qrcode` is a plain dependency), so pnpm >= 10's `allowBuilds` will not block it. A successful install enters the profile's `dsh.profile.bundles`.
 
-3. **告诉用户重启 DSH / DSH Desktop。** 重启后右下角应出现微信绿色悬浮球 → 扫码登录。不要假设不重启也能用。
+3. **Tell the user to restart DSH / DSH Desktop.** The green WeChat floating ball appears bottom-right after the restart, then scan to log in. Do not assume it works without a restart.
 
-4. **不要**只改 `cordis.patch.yml` 却不装包；**不要**假设 profile 一定是 `web`；**不要**用 `spawn` 网关时去掉 `ELECTRON_RUN_AS_NODE`（Windows Desktop 的 `process.execPath` 是 exe 不是 node）。
+4. Do **not** only edit `cordis.patch.yml` without installing the package; do **not** assume the profile is `web`; do **not** drop `ELECTRON_RUN_AS_NODE` when spawning the gateway (on Windows Desktop `process.execPath` is an `.exe`, not node).
 
-### 手动安装（脚本，本地 checkout 开发用）
-
-**macOS / Linux / Git Bash：**
+### Local-checkout install (development)
 
 ```sh
 git clone https://github.com/zhengjy01/dsh-wechat-clawbot
 cd dsh-wechat-clawbot
-bash install-wechat.sh
+bash install-wechat.sh      # macOS / Linux / Git Bash
+.\install-wechat.ps1        # Windows PowerShell
 ```
 
-**Windows PowerShell：**
+Then restart DSH and scan the floating ball.
 
-```powershell
-git clone https://github.com/zhengjy01/dsh-wechat-clawbot
-cd dsh-wechat-clawbot
-.\install-wechat.ps1                  # 自动选择 desktop 或 web
-.\install-wechat.ps1 -Profile desktop # 强制装进 DSH Desktop
-```
+## 📱 Usage
 
-### 手动安装（DSH 插件命令）
+- **Receiving** — messages go into a **dedicated WeChat conversation area** (visible in the GUI sidebar, never mixed into your GUI chat); context is continuous and **history is restored after a restart**.
+- **Switching conversations** — send `/new`, `/新对话` or `/新会话` in WeChat, or press "New conversation" in the floating-ball panel (the previous conversation is kept). Otherwise the current one is reused.
+- **ClawBot model** — the panel's quick-pick lists models with configured keys; "custom" lets you type a provider/model, and you can choose a thinking effort (off/high/max). It applies **only to WeChat turns** and survives restarts; pick "follow DSH default" and save to clear it.
+- **New contacts** — an empty allowlist allows everyone; strangers get an automatic notice and appear in the panel for approve/ignore.
 
-若你自己跑命令：先看 `$DSH_HOME/profiles/` 里是 `desktop` 还是 `web`，再用那个名字：
+## ⚙️ Configuration
 
-```sh
-dsh plugin --profile desktop add github:zhengjy01/dsh-wechat-clawbot
-# 或
-dsh plugin --profile web add github:zhengjy01/dsh-wechat-clawbot
-```
-
-### 一键脚本（本地 checkout）
-
-```sh
-# 1. 安装（幂等，可重复执行；脚本会：装网关依赖 → 建 peer 垫片 →
-#    把整个仓库链接进 DSH profile 的 node_modules/dsh-wechat-clawbot → 写入 cordis.patch.yml）
-bash install-wechat.sh
-
-# 2. 重启 DeepSeek Harness 应用（让宿主插件与悬浮球加载）
-
-# 3. 扫码
-#    GUI 右下角绿色微信悬浮球 → 点击 → 手机微信「扫一扫」
-#    （部分账号首次登录需在面板输入手机显示的验证码）
-```
-
-验证网关：
-
-```sh
-curl http://127.0.0.1:51235/status
-# {"phase":"logged_in","message":"已恢复登录（使用已保存的凭证）",...} 或 {"phase":"waiting_qrcode",...}
-```
-
-### 安装脚本做了什么
-
-1. `wechat-gateway/` 内 `npm install`（安装/确认 `qrcode` 依赖）。
-2. 为 `dsh-wechat-bot` 与 `dsh-wechat-bridge` 建立 `node_modules/@deepseek-ai/*` 依赖垫片（软链/junction 到 `$DSH_HOME/profiles/node_modules`）——只有「软链本地仓库」这种开发模式需要（DSH 按真实路径解析插件，真实路径的上级看不到 profile 的 `node_modules`）；用 `dsh plugin add` 安装时不需要。
-3. 把**整个仓库**链接为 `$DSH_HOME/profiles/<desktop|web>/node_modules/dsh-wechat-clawbot`。
-4. 在该 profile 的 `cordis.patch.yml` 注入 `wechat-bot` 一行（若文件是空的 `[]` 则整文件替换，避免无效 YAML）；悬浮球由同一个包的 `dsh.client` 声明自动注册，不需要单独的行。
-
-卸载：删掉 `cordis.patch.yml` 中对应段与 `profiles/<name>/node_modules/dsh-wechat-clawbot`，重启即可；`~/.dsh-wechat/` 删除即退出登录。
-
-## 📱 使用
-
-- **收消息**：微信消息进入**独立的微信对话区**（GUI 侧边栏可见，不会混入你的 GUI 聊天）；同对话区上下文连续，**重启 DSH 自动恢复历史记忆**。
-- **切换对话**：微信发 `/new`、`/新对话`、`/新会话`，或悬浮球面板点「新对话」→ 新建对话区（旧对话保留）；其余时间一直沿用当前对话。
-- **ClawBot 使用模型**：面板「快捷选择」列出已配密钥的模型（自动检测密钥状态），或「自定义填写」Provider/模型，选思考强度（off/high/max），保存后**只对微信回合生效**、重启保留；选「跟随 DSH 默认」再保存即清除配置。
-- **新联系人**：白名单为空 = 允许所有；陌生人消息会先收到提示，并在面板出现「批准/忽略」。
-
-## ⚙️ 配置
-
-`$DSH_HOME/profiles/<desktop|web>/cordis.patch.yml`（`dsh plugin add` 会自动带上这一段；下面是完整形态）：
+`$DSH_HOME/profiles/<desktop|web>/cordis.patch.yml` (`dsh plugin add` writes this section; the full form):
 
 ```yaml
 - insert:
     - id: wechat-bot
       name: dsh-wechat-clawbot
       config:
-        gatewayPort: 51235        # 微信网关端口（默认 51235）
-        modelPort: 51236          # 模型配置端点端口（默认 51236）
-        timeoutMs: 300000         # 单回合超时
+        gatewayPort: 51235        # WeChat gateway port (default 51235)
+        modelPort: 51236          # model-config endpoint port (default 51236)
+        timeoutMs: 300000         # per-turn timeout
         maxMessageChars: 20000
-        approval: reject          # 回合内审批：自动拒绝并注明（可在 GUI 重跑）
+        approval: reject          # in-turn approvals: auto-reject with a note (re-runnable in the GUI)
 ```
 
-网关环境变量（`wechat-gateway/gateway.mjs`）：`PORT`（默认 51235）、`STATE_DIR`（默认 `~/.dsh-wechat`）、`UNAPPROVED_REPLY`（未授权自动回复文案）、`LOG_LEVEL`（debug/info）。
+Gateway environment variables (`wechat-gateway/gateway.mjs`): `PORT` (default 51235), `STATE_DIR` (default `~/.dsh-wechat`), `UNAPPROVED_REPLY`, `LOG_LEVEL` (debug/info).
 
-宿主插件端口/状态目录也可用环境变量覆盖（默认值同 `gatewayPort=51235` / `modelPort=51236` / `stateDir=~/.dsh-wechat`）：`DSH_WECHAT_GATEWAY_PORT`、`DSH_WECHAT_MODEL_PORT`、`DSH_WECHAT_STATE_DIR`。可移植性验证在隔离实例里就是靠这三个变量避开本机已占用的端口。
+The host plugin's ports and state directory can also be overridden by environment variables (defaults unchanged): `DSH_WECHAT_GATEWAY_PORT`, `DSH_WECHAT_MODEL_PORT`, `DSH_WECHAT_STATE_DIR`. The portability verification relies on these three to avoid ports already taken by the live instance.
 
-## 🧪 开发与测试
+## 🧪 Development and testing
 
-- 语法：`node --check <file>`；网关/插件零构建（纯 JS ESM）。
-- 会话结算单元测试：`node dsh-wechat-bridge/settle.test.mjs`（覆盖 turn/end 结算、超时、报错、丢弃兜底、模型覆盖等场景，共 7 项）。
-- 网关可独立运行调试：`cd wechat-gateway && npm install && node gateway.mjs`。
-- 修改宿主插件或网关后需**重启 DSH** 生效；修改 `client.js`（悬浮球）同样重启生效（boot 图缓存）。
+- Syntax: `node --check <file>`. Gateway and plugins are plain JS ESM with **zero build**.
+- Session-settlement unit tests: `node dsh-wechat-bridge/settle.test.mjs` (turn/end settlement, timeout, errors, discard fallback, model override — 7 cases).
+- The gateway can run standalone for debugging: `cd wechat-gateway && npm install && node gateway.mjs`.
+- After changing the host plugin or the gateway you must **restart DSH**; `client.js` (floating ball) also needs a restart (boot-graph cache).
 
-### 可移植性验证（发布前门禁）
+### Portability verification (pre-release gate)
 
-每个版本发布前必须按「别人的电脑」验证一遍：在**隔离的 `DSH_HOME`** 里用空 profile + tarball（不走 `link:`）安装并启动，检查入口进包、宿主健康路由、客户端 bundle 注册、就绪后的稳定性。健康路由是 `GET /api/dsh-wechat-bot/probe`。
+Every release must be verified as if on **someone else's computer**: install a tarball into an empty profile inside an **isolated `DSH_HOME`** (never `link:`), then start it and check that declared entries are inside the package, the host health route answers, the client bundle registers, and the instance stays up afterwards. The health route is `GET /api/dsh-wechat-bot/probe`.
 
 ```sh
-npm run verify:quick   # 快速：跳过静态体检，稳定性观察 5s
-npm run verify         # 标准：静态体检 + 完整八步
-npm run verify:full    # 发布前：标准 + 30s 稳定性观察
+npm run verify:quick   # fast: skip the static audit, 5s stability watch
+npm run verify         # standard: static audit + the full eight steps
+npm run verify:full    # pre-release: standard + 30s stability watch
 ```
 
-本机跑验证时，先给网关/模型端点让开已被主实例占用的端口（可选）：
+When running on the machine that already runs a live instance, move the ports out of the way first (optional):
 
 ```sh
 DSH_WECHAT_GATEWAY_PORT=51335 DSH_WECHAT_MODEL_PORT=51336 \
 DSH_WECHAT_STATE_DIR="$(mktemp -d)" npm run verify:full
 ```
 
-看到 `✅ 通过` 才允许进入发布流程；判定标准见 `PORTABILITY-SOP.md` 与 `2️⃣ AI/Standards/DSH插件可移植性验证清单.md`。
+Only `✅ 通过` permits a release. Criteria live in `PORTABILITY-SOP.md`.
 
-## 🛠️ 排障
+## 🛠️ Troubleshooting
 
-| 现象 | 处理 |
+| Symptom | What to do |
 |---|---|
-| 没有悬浮球 | 确认已装进正在运行的那个 profile（Desktop 用 `desktop`，CLI 用 `web`）并重启过应用 |
-| **DSH Desktop 双击闪退** | 多为找不到 `@deepseek-ai/schemastery`。用官方路径重装：`dsh plugin --profile desktop add github:zhengjy01/dsh-wechat-clawbot`（软链本地仓库的开发模式才需要 `node scripts/link-peer-shims.mjs` 建垫片） |
-| 面板「无法连接网关」 | 网关没起来。DSH Desktop（Electron）必须用 `ELECTRON_RUN_AS_NODE=1` 拉起网关（0.1.1 已内置）。检查 `netstat -ano \| findstr 51235` 是否 LISTENING；看日志 `wechat-gateway:` 行 |
-| 登录后重启又要扫码 | 正常情况会自动恢复；若出现「登录已失效」说明 token 被微信侧吊销，需重扫 |
-| 微信发消息没反应 | 面板确认状态为「已连接」；新联系人需先批准；日志看 `dsh-wechat-bot:` 行 |
-| 回复/主动推送失败 | 登录态失效：面板解绑后重新扫码，或删 `~/.dsh-wechat/accounts/`。主动推送依赖最近一次交互的 `context_token`（网关已自动落盘复用），长期无交互后先让用户发一条消息 |
-| 模型配置不生效 | 确认面板保存成功；配置只对**微信发起的回合**生效（GUI 手动回合不受影响） |
-| 想清空所有状态 | 删除 `~/.dsh-wechat/`（凭证/模型/会话映射一并清除） |
+| No floating ball | Make sure the package is installed into the profile that is actually running (`desktop` for Desktop, `web` for the CLI) and that the app was restarted |
+| **DSH Desktop crashes on double-click** | Usually a missing `@deepseek-ai/schemastery`. Reinstall through the official path: `dsh plugin --profile desktop add github:zhengjy01/dsh-wechat-clawbot` (only the symlinked local-checkout dev mode needs `node scripts/link-peer-shims.mjs`) |
+| Panel says "cannot reach gateway" | The gateway is not up. DSH Desktop (Electron) must spawn it with `ELECTRON_RUN_AS_NODE=1` (built in since 0.1.1). Check whether 51235 is LISTENING and look for `wechat-gateway:` log lines |
+| Re-scan required after restart | Normally the session resumes; "login expired" means WeChat revoked the token, so scan again |
+| WeChat messages get no reply | Confirm the panel shows "connected"; new contacts must be approved first; look for `dsh-wechat-bot:` log lines |
+| Replies / proactive pushes fail | The login is stale: unbind in the panel and scan again, or delete `~/.dsh-wechat/accounts/`. Proactive pushes depend on the most recent interaction's `context_token` (the gateway persists and reuses it automatically), so after a long silence have the user send one message first |
+| Model config has no effect | Make sure the panel saved it; the config applies only to **WeChat-initiated turns** (manual GUI turns are unaffected) |
+| Reset everything | Delete `~/.dsh-wechat/` (credentials, model, session mapping) |
 
-## 📄 许可证
+## Compatibility
 
-MIT。上游 [`lubaiUwU/DSH-WeChatClawBot`](https://github.com/lubaiUwU/DSH-WeChatClawBot) 的 `LICENSE`（Copyright (c) 2026 lubai）在本仓库**原样保留**；本仓库的修改同样以 MIT 发布，不改变原始版权声明。协议核心（iLink 客户端）源自 [`@tencent-weixin/openclaw-weixin`](https://www.npmjs.com/package/@tencent-weixin/openclaw-weixin)（腾讯官方渠道插件，MIT）。
+Requires **DeepSeek Harness >= 0.1.5-rc.1** (declared as `dsh.engines.dsh`) and is verified against **0.1.5-rc.1** — including the isolated-`DSH_HOME` tarball install, the `/api/dsh-wechat-bot/probe` health route, and the client bundle registering in `__DSH_BOOT__.entries`. Node.js >= 22.19 is required by the DSH engine.
 
-> ⚠️ 免责声明：本项目仅供学习与个人自动化研究。使用个人微信账号自动化存在**账号风控/封号风险**，请使用小号并自行承担后果。本项目与腾讯、DeepSeek 无官方关联。
+## 📄 License
 
-## 本仓库的改动
+MIT. The upstream [`lubaiUwU/DSH-WeChatClawBot`](https://github.com/lubaiUwU/DSH-WeChatClawBot) `LICENSE` (Copyright (c) 2026 lubai) is **kept verbatim** in this repository, and this repository's modifications are released under the same MIT terms without altering the original copyright notice. The protocol core (iLink client) derives from [`@tencent-weixin/openclaw-weixin`](https://www.npmjs.com/package/@tencent-weixin/openclaw-weixin) (Tencent's official channel plugin, MIT).
 
-本仓库（`zhengjy01/dsh-wechat-clawbot`）是上游 `lubaiUwU/DSH-WeChatClawBot` 的独立维护分支，不是 GitHub fork 关系。相对上游（最后提交 2026-08-17 `b817fc9`）的改动：
+> ⚠️ Disclaimer: this project is for learning and personal automation research. Automating a personal WeChat account carries **risk-control / ban risk** — use a secondary account and accept the consequences. This project is not affiliated with Tencent or DeepSeek.
 
-| 提交 | 类型 | 内容 |
+## Changes in this repository
+
+This repository (`zhengjy01/dsh-wechat-clawbot`) is an independently maintained line of upstream `lubaiUwU/DSH-WeChatClawBot`, not a GitHub fork. Changes relative to upstream (last commit 2026-08-17, `b817fc9`):
+
+| Commit | Type | Content |
 |---|---|---|
-| `6668793` | **修复** | **登录循环覆盖**：`startLogin` 每轮递增 `state.loginGen`，旧轮次只能 `bailIfSuperseded` 静默退出，不能再 `setPhase`/刷新二维码（原来会把 `logged_in` 改回 `waiting_qrcode`）；`/send` 只校验持有 token、不再硬卡 phase，二维码刷新期间不丢已生成的回复；`modelServer` 增加 `error` 监听，端口占用不再终结 DSH 宿主。 |
-| `273601d` | **修复** | **主动推送 `context_token` 复用**：iLink 的 `sendmessage` 需要「打开的会话上下文」，入站消息带 `context_token` 但原网关只在自动回复路径透传，所有 fire-and-forget 推送（日报/通知/派发器）在距上次交互一段时间后一律 `502 ret=-2 prepare failed`。修复把每个发送者最近一次的 `context_token` 落盘（`<stateDir>/context-tokens.json`，0600，最多 50 个），`/send` 在调用方未显式提供时自动复用；调用方仍可用 `contextToken` 覆盖。 |
-| 本次 | **新增/调整** | ① 打成**单一 npm 包**（`index.js` 转出宿主、`dsh.client` 声明悬浮球），移除了上游的 `file:` 子包依赖与 `prepare`/`postinstall`——上游那种结构在 pnpm 10 下 `dsh plugin add` 会因「解析不到 `file:` 子包」或「build scripts 被拦截」而**直接装不上**；② `GET /api/dsh-wechat-bot/probe` 宿主存活探针；③ `DSH_WECHAT_GATEWAY_PORT` / `DSH_WECHAT_MODEL_PORT` / `DSH_WECHAT_STATE_DIR` 三个环境变量覆盖（默认值不变），用于隔离的可移植性验证；④ 补齐 `scripts/portability.mjs` + `PORTABILITY-SOP.md` + `verify` 三条 npm script；⑤ 宿主内 `dsh-wechat-bridge` 改为相对导入，安装路径不再依赖 peer 垫片。 |
+| `6668793` | **Fix** | **Login-loop state override**: each `startLogin` round increments `state.loginGen`, so a superseded round can only `bailIfSuperseded` and exit silently — it can no longer `setPhase`/refresh the QR code (it used to flip `logged_in` back to `waiting_qrcode`). `/send` now only checks that a token is held instead of hard-gating on `phase`, so replies generated while the QR code refreshes are not dropped. `modelServer` gained an `error` listener so a port conflict no longer kills the DSH host. |
+| `273601d` | **Fix** | **`context_token` reuse for proactive pushes**: iLink's `sendmessage` needs an "open" conversation context. Inbound messages carry a `context_token`, but the original gateway only forwarded it on the auto-reply path, so every fire-and-forget push (daily reports, notifications, the task dispatcher) began failing with `502 ret=-2 prepare failed` once the last interaction went stale. The fix persists each sender's latest `context_token` (`<stateDir>/context-tokens.json`, mode 0600, at most 50 senders) and `/send` reuses it automatically when the caller does not supply one; callers can still override via `contextToken`. |
+| This release | **Added / adjusted** | ① Shipped as a **single npm package** (`index.js` re-exports the host; `dsh.client` declares the floating ball) and dropped upstream's `file:` subpackage dependencies and `prepare`/`postinstall` — under pnpm 10 that structure makes `dsh plugin add` **fail outright** (unresolvable `file:` subpackage, or blocked build scripts). ② `GET /api/dsh-wechat-bot/probe` host liveness route. ③ `DSH_WECHAT_GATEWAY_PORT` / `DSH_WECHAT_MODEL_PORT` / `DSH_WECHAT_STATE_DIR` overrides (defaults unchanged) for the isolated portability verification. ④ Added `scripts/portability.mjs` + `PORTABILITY-SOP.md` + three `verify` npm scripts. ⑤ The host now imports `dsh-wechat-bridge` relatively, so the install path no longer depends on peer shims. |
 
-未改动的上游行为：扫码登录、悬浮球面板、白名单、ClawBot 模型配置、独立对话区 `/new` 切换等全部保持一致。上游 PR ＃1（对应本仓库修复 `6668793`，自 2026-09-11 起 0 回应）继续保留在上游仓库供上游合并。
+Unchanged upstream behaviour: QR login, the floating-ball panel, the allowlist, ClawBot model configuration and `/new` conversation switching all stay the same. Upstream PR #1 (corresponding to `6668793`, no response since 2026-09-11) is left open for upstream to merge.
