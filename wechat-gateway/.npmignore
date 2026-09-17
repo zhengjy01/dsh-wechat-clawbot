@@ -1,0 +1,6 @@
+# 网关作为子目录打包进 dsh-wechat-clawbot 时，不要把本地安装的依赖树带进去：
+# 根 package.json 已声明 `qrcode`，运行时由 profile 的 node_modules 解析（Node 会向上查找）。
+# 不排除的话 npm 会把整个嵌套 node_modules 打进 tarball（实测 300/331 个文件、含一份
+# 陈旧重复的依赖树），既撑大包体又有版本漂移风险。
+node_modules/
+package-lock.json
