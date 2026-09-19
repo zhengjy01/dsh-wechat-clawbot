@@ -35,6 +35,7 @@ DSH agent (dedicated WeChat conversation area; context is kept long-term)
 - **Explicit new-conversation command** — send `/new` in WeChat (or `/新对话` / `/新会话`), or press "New conversation" in the panel. Otherwise the same conversation is always reused.
 - **ClawBot-specific model** — pick a model and thinking effort (off/high/max) in the panel; it persists across restarts and applies **only to WeChat turns**.
 - **Contact allowlist** — allow everyone by default; approve or ignore new contacts from the panel.
+- **Conversation-window health & keepalive** — Tencent only accepts proactive pushes while the user's conversation window is open (the local login `phase` does **not** reflect this). The gateway stamps every inbound message into `last-inbound.json`, exposes `GET /window` + `POST /probe` (a lossless probe that never messages the user), and rejects sends with a machine-readable `reason` (`window_closed` / `window_open_invalid_arguments`) plus a human hint. The host plugin runs a built-in keepalive loop: when the window silently closes it raises one desktop notification ("reply to renew") and stops probing until the user talks again. **No local script or launchd job is needed.**
 
 ## 🖥️ Requirements
 
@@ -55,7 +56,7 @@ DSH agent (dedicated WeChat conversation area; context is kept long-term)
 | `127.0.0.1:51234` | dsh-wechat-bridge HTTP bridge | Debugging / OpenClaw forwarding |
 | `127.0.0.1:51235` | wechat-gateway | WeChat protocol send/receive, QR login, SSE events |
 | `127.0.0.1:51236` | dsh-wechat-bot model endpoint | The floating ball reads/writes the "ClawBot model" configuration |
-| `~/.dsh-wechat/` | State directory | Credentials, allowlist, model config (`clawbot-model.json`), session mapping (`bridge-sessions.json`), conversation index (`wechat-session.json`), and proactive-push context (`context-tokens.json`) |
+| `~/.dsh-wechat/` | State directory | Credentials, allowlist, model config (`clawbot-model.json`), session mapping (`bridge-sessions.json`), conversation index (`wechat-session.json`), proactive-push context (`context-tokens.json`), inbound clock (`last-inbound.json`), window health (`window-state.json`) and the keepalive ledger (`window-keepalive.json`) |
 
 `$DSH_HOME` defaults to **`~/.dsh`** (Windows: `C:\Users\<you>\.dsh`); on macOS the desktop `.app` may use `~/Library/Application Support/DeepSeekHarness`. Override it with the `DSH_HOME` environment variable. A DSH Desktop profile is usually named `desktop` and the CLI Web profile `web` — the installing agent picks automatically.
 
@@ -66,8 +67,8 @@ dsh-wechat-clawbot/
 ├── package.json          # single bundle manifest (dsh.bundle → cordis.patch.yml; dsh.client → floating ball)
 ├── index.js              # host entry: re-exports ./dsh-wechat-bot (one installable unit)
 ├── cordis.patch.yml      # injects the wechat-bot row (host; the client half self-registers via dsh.client)
-├── wechat-gateway/       # WeChat gateway (gateway.mjs, Node built-in fetch, depends on qrcode)
-├── dsh-wechat-bot/       # host plugin (supervises the gateway, session injection, model endpoint, /probe)
+├── wechat-gateway/       # WeChat gateway (gateway.mjs, window.mjs; Node built-in fetch, depends on qrcode)
+├── dsh-wechat-bot/       # host plugin (supervises the gateway, session injection, model endpoint, /probe, keepalive.mjs)
 ├── dsh-client-wechat-ui/ # browser floating-ball bundle (client.js, zero dependencies)
 ├── dsh-wechat-bridge/    # session-driver core (createBridge + optional HTTP bridge + unit tests)
 ├── install-wechat.sh     # local-checkout install (symlinks the repo, macOS/Linux/Git Bash)
@@ -141,6 +142,10 @@ Then restart DSH and scan the floating ball.
         timeoutMs: 300000         # per-turn timeout
         maxMessageChars: 20000
         approval: reject          # in-turn approvals: auto-reject with a note (re-runnable in the GUI)
+        keepalive: true           # built-in conversation-window keepalive (default true)
+        keepaliveIntervalMinutes: 30   # how often to check the window
+        keepaliveNudgeHours: 0    # optional: nudge on WeChat while open & silent ≥ N hours (0 = off)
+        keepaliveNotify: true     # desktop notification when the window closes (macOS)
 ```
 
 Gateway environment variables (`wechat-gateway/gateway.mjs`): `PORT` (default 51235), `STATE_DIR` (default `~/.dsh-wechat`), `UNAPPROVED_REPLY`, `LOG_LEVEL` (debug/info).
@@ -150,6 +155,7 @@ The host plugin's ports and state directory can also be overridden by environmen
 ## 🧪 Development and testing
 
 - Syntax: `node --check <file>`. Gateway and plugins are plain JS ESM with **zero build**.
+- Unit tests: `npm test` (window classification + keepalive state machine, `node --test`; no network).
 - Session-settlement unit tests: `node dsh-wechat-bridge/settle.test.mjs` (turn/end settlement, timeout, errors, discard fallback, model override — 7 cases).
 - The gateway can run standalone for debugging: `cd wechat-gateway && npm install && node gateway.mjs`.
 - After changing the host plugin or the gateway you must **restart DSH**; `client.js` (floating ball) also needs a restart (boot-graph cache).
@@ -182,7 +188,8 @@ Only `✅ 通过` permits a release. Criteria live in `PORTABILITY-SOP.md`.
 | Panel says "cannot reach gateway" | The gateway is not up. DSH Desktop (Electron) must spawn it with `ELECTRON_RUN_AS_NODE=1` (built in since 0.1.1). Check whether 51235 is LISTENING and look for `wechat-gateway:` log lines |
 | Re-scan required after restart | Normally the session resumes; "login expired" means WeChat revoked the token, so scan again |
 | WeChat messages get no reply | Confirm the panel shows "connected"; new contacts must be approved first; look for `dsh-wechat-bot:` log lines |
-| Replies / proactive pushes fail | The login is stale: unbind in the panel and scan again, or delete `~/.dsh-wechat/accounts/`. Proactive pushes depend on the most recent interaction's `context_token` (the gateway persists and reuses it automatically), so after a long silence have the user send one message first |
+| Replies / proactive pushes fail | First check the window, not the login: `curl http://127.0.0.1:51235/window` (or `POST /probe`). `ret=-2 prepare failed` / `reason=window_closed` means Tencent's conversation window is closed — the inbound `context_token` alone cannot reopen it. Ask the user to send the bot one message; the keepalive loop will also raise a desktop notification on the open → closed transition. A stale login is the other cause: unbind in the panel and scan again, or delete `~/.dsh-wechat/accounts/` |
+| `window_closed` but the user says they just wrote | The clock comes from real inbound messages (`last-inbound.json`); check that the phone actually delivered a message and that the gateway log shows the inbound. `POST /probe` returns `ret=-3` when the window is genuinely open |
 | Model config has no effect | Make sure the panel saved it; the config applies only to **WeChat-initiated turns** (manual GUI turns are unaffected) |
 | Reset everything | Delete `~/.dsh-wechat/` (credentials, model, session mapping) |
 
@@ -202,6 +209,7 @@ This repository (`zhengjy01/dsh-wechat-clawbot`) is an independently maintained 
 
 | Commit | Type | Content |
 |---|---|---|
+| `0.2.1` | **Fix** | **Conversation-window health moved into the plugin** (the real cause behind "the bot stopped notifying"): the gateway now stamps `last-inbound.json` on every inbound message, exposes `GET /window` + `POST /probe` (a lossless probe to a nonexistent recipient) and returns a machine-readable `reason`/`hint` on send failure; the host plugin runs a built-in keepalive loop that notifies once when the window closes and stops probing until the user talks again. The liveness probe now reports `version`. No local script/launchd job is required on a fresh machine. |
 | `6668793` | **Fix** | **Login-loop state override**: each `startLogin` round increments `state.loginGen`, so a superseded round can only `bailIfSuperseded` and exit silently — it can no longer `setPhase`/refresh the QR code (it used to flip `logged_in` back to `waiting_qrcode`). `/send` now only checks that a token is held instead of hard-gating on `phase`, so replies generated while the QR code refreshes are not dropped. `modelServer` gained an `error` listener so a port conflict no longer kills the DSH host. |
 | `273601d` | **Fix** | **`context_token` reuse for proactive pushes**: iLink's `sendmessage` needs an "open" conversation context. Inbound messages carry a `context_token`, but the original gateway only forwarded it on the auto-reply path, so every fire-and-forget push (daily reports, notifications, the task dispatcher) began failing with `502 ret=-2 prepare failed` once the last interaction went stale. The fix persists each sender's latest `context_token` (`<stateDir>/context-tokens.json`, mode 0600, at most 50 senders) and `/send` reuses it automatically when the caller does not supply one; callers can still override via `contextToken`. |
 | This release | **Added / adjusted** | ① Shipped as a **single npm package** (`index.js` re-exports the host; `dsh.client` declares the floating ball) and dropped upstream's `file:` subpackage dependencies and `prepare`/`postinstall` — under pnpm 10 that structure makes `dsh plugin add` **fail outright** (unresolvable `file:` subpackage, or blocked build scripts). ② `GET /api/dsh-wechat-bot/probe` host liveness route. ③ `DSH_WECHAT_GATEWAY_PORT` / `DSH_WECHAT_MODEL_PORT` / `DSH_WECHAT_STATE_DIR` overrides (defaults unchanged) for the isolated portability verification. ④ Added `scripts/portability.mjs` + `PORTABILITY-SOP.md` + three `verify` npm scripts. ⑤ The host now imports `dsh-wechat-bridge` relatively, so the install path no longer depends on peer shims. |

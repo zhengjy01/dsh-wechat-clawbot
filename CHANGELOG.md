@@ -5,6 +5,39 @@
 
 ## [Unreleased]
 
+## [0.2.1] - 2026-09-19
+
+把「会话窗口健康 + 保鲜提醒」从本机手写脚本收进插件本体，修复「完成任务却收不到通知」的根因。
+
+### 背景
+
+腾讯 iLink 只在用户「会话窗口」打开时接受主动推送；窗口只有用户能开（他从手机给机器人发一句话），机器人发出去的消息不给它续期。窗口关闭后一律 `ret=-2 prepare failed`，而网关 `/status` 的 `phase` 仍是 `logged_in`——**本地状态不反映出站可用性**。旧脚本因此静默降级成 macOS 横幅，用户对通道已坏完全无感。
+
+### 新增 (Added)
+
+- **网关侧入站时钟**：对**每条入站消息**落盘 `<stateDir>/last-inbound.json`（`at/ts/from/preview/count`）。不能用 `context-tokens.json` 的 `updatedAt`——`saveContextToken()` 在 token 未变化时跳过写入，连续消息会让时间冻住。
+- **`GET /window` 窗口健康**：返回 `window`(open/closed/unknown)、`lastInboundAt`、`age`、最近一次发送/探测结果与 `hint`；`/status` 同步暴露 `window`/`lastInboundAt`。
+- **`POST /probe` 无损探针**：往不存在的收件人发消息，腾讯走到参数校验即返回（`ret=-3` 窗口开 / `ret=-2` 窗口关），**不给用户发任何消息**。
+- **发送失败的结构化原因**：`/send` 失败返回 `{ ok:false, reason, ret, window, hint, lastInboundAt, age }`，不再只有一句 `ret=-2 prepare failed`。
+- **插件内置保鲜循环**（宿主插件）：每 30 分钟检查一次（`keepalive` / `keepaliveIntervalMinutes` / `keepaliveNudgeHours` / `keepaliveNotify` 可配）。窗口「开→关」跳变时弹**一次**桌面通知（macOS）提醒「回一句话即可恢复」；已关则停止空探，直到入站时钟变化（用户回话）才再探一次确认。全新机器安装插件即自带，**不依赖任何本机脚本或 launchd 定时器**。
+- **`window/state` SSE 事件**：窗口状态变化时广播。
+- **单元测试**：`npm test`（窗口错误分类 + 保鲜状态机，`node --test`，无需网络）。
+
+### 修复 (Fixed)
+
+- **存活探针缺少 `version` 字段**：`GET /api/dsh-wechat-bot/probe` 现在返回 `version`（读本包 `package.json`），兑现 CHANGELOG 一直以来的承诺，发布验收「重启后探针报版本」得以成立。
+
+### 变更 (Changed)
+
+- `wechat-gateway/gateway.mjs` 的 `sendMessage()` 把 iLink 的 `ret`/`errmsg` 挂到 Error 上，供统一分类；`ret=-3` 不再被误当成「通道坏了」。
+- README 双语补充 `/window`、`/probe`、子命令与排障口径。
+
+### 兼容性 (Compatibility)
+
+- DSH：`>=0.1.5-rc.1`
+- Node：`>=22.19`
+- 旧调用方无需改动：`/send` 成功语义不变；新增字段只在失败响应里出现。旧网关（无 `/window`）上，通知/日报脚本会自动回落到原来的「发送后看结果」路径。
+
 ## [0.2.0] - 2026-09-17
 
 本仓库（`zhengjy01/dsh-wechat-clawbot`）作为独立维护线接手上游 `lubaiUwU/DSH-WeChatClawBot` 后的首个版本（上游最后提交 `b817fc9`，2026-08-17；维护者自 2026-08-18 起无活动）。

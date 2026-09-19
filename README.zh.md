@@ -37,6 +37,7 @@ dsh-client-wechat-ui ← 浏览器悬浮球（扫码/验证码/白名单/模型�
 - **按命令切换对话**：微信发 `/new`（或 `/新对话`、`/新会话`）、悬浮球点「新对话」才新建对话区；默认永远沿用同一对话
 - **ClawBot 专用模型**：面板配置模型（快捷选择已配密钥的模型 / 自定义填写）+ 思考强度（off/high/max），重启后保留，只对微信回合生效
 - **联系人白名单**：默认允许所有；可在面板批准/忽略新联系人
+- **会话窗口健康 + 保鲜**：腾讯只接受「开着会话窗口」时的主动推送，而本地登录 `phase` **反映不出**这一点。网关把每条入站消息落盘成 `last-inbound.json`，暴露 `GET /window` 与 `POST /probe`（发往不存在收件人的无损探针，**不会给用户发任何消息**），`/send` 失败时返回机器可读的 `reason`（`window_closed` / `window_open_invalid_arguments`）与人类可读 `hint`。宿主插件内置保鲜循环：窗口静默关闭时弹**一次**桌面通知（「回一句话即可恢复」），此后不再空探，直到用户回话。**不需要任何本机脚本或 launchd 定时器。**
 
 ## 🖥️ 环境要求
 
@@ -57,7 +58,7 @@ dsh-client-wechat-ui ← 浏览器悬浮球（扫码/验证码/白名单/模型�
 | `127.0.0.1:51234` | dsh-wechat-bridge HTTP 桥 | 调试 / OpenClaw 转发方案 |
 | `127.0.0.1:51235` | wechat-gateway | 微信协议收/发、扫码登录、SSE 事件 |
 | `127.0.0.1:51236` | dsh-wechat-bot 模型端点 | 悬浮球读写「ClawBot 使用模型」配置 |
-| `~/.dsh-wechat/` | 状态目录 | 登录凭证、白名单、模型配置（`clawbot-model.json`）、会话映射（`bridge-sessions.json`）、对话区编号（`wechat-session.json`）、主动推送上下文（`context-tokens.json`） |
+| `~/.dsh-wechat/` | 状态目录 | 登录凭证、白名单、模型配置（`clawbot-model.json`）、会话映射（`bridge-sessions.json`）、对话区编号（`wechat-session.json`）、主动推送上下文（`context-tokens.json`）、入站时钟（`last-inbound.json`）、窗口健康（`window-state.json`）、保鲜账本（`window-keepalive.json`） |
 
 `$DSH_HOME` 默认 **`~/.dsh`**（Windows：`C:\Users\<你>\.dsh`）；Mac 桌面 `.app` 可能是 `~/Library/Application Support/DeepSeekHarness`。可用环境变量 `DSH_HOME` 覆盖。DSH Desktop 的 profile 一般叫 `desktop`，CLI Web 一般叫 `web`（安装 Agent 会自动选，用户不用记）。
 
@@ -72,8 +73,8 @@ dsh-wechat-clawbot/
 ├── package.json          # 单一组合包 manifest（dsh.bundle → cordis.patch.yml；dsh.client → 悬浮球）
 ├── index.js              # 宿主入口：转出 ./dsh-wechat-bot（让整包只有一个安装单元）
 ├── cordis.patch.yml      # 注入 wechat-bot 一行（宿主；悬浮球由 dsh.client 自动注册）
-├── wechat-gateway/       # 微信网关（gateway.mjs，Node 内置 fetch，依赖 qrcode）
-├── dsh-wechat-bot/       # 宿主插件实现（管理网关进程、会话注入、模型端点、/probe）
+├── wechat-gateway/       # 微信网关（gateway.mjs、window.mjs，Node 内置 fetch，依赖 qrcode）
+├── dsh-wechat-bot/       # 宿主插件实现（管理网关进程、会话注入、模型端点、/probe、keepalive.mjs）
 ├── dsh-client-wechat-ui/ # 浏览器悬浮球 bundle（client.js，零依赖）
 ├── dsh-wechat-bridge/    # 会话驱动核心（createBridge + 可选 HTTP 桥 + 单元测试）
 ├── install-wechat.sh     # 本地 checkout 安装（软链整仓，macOS/Linux/Git Bash）
@@ -195,6 +196,10 @@ curl http://127.0.0.1:51235/status
         timeoutMs: 300000         # 单回合超时
         maxMessageChars: 20000
         approval: reject          # 回合内审批：自动拒绝并注明（可在 GUI 重跑）
+        keepalive: true           # 内置会话窗口保鲜（默认开）
+        keepaliveIntervalMinutes: 30   # 多久检查一次窗口
+        keepaliveNudgeHours: 0    # 可选旧行为：窗口开着且静默 ≥N 小时就在微信敲一下（0=关）
+        keepaliveNotify: true     # 窗口关闭时弹桌面通知（macOS）
 ```
 
 网关环境变量（`wechat-gateway/gateway.mjs`）：`PORT`（默认 51235）、`STATE_DIR`（默认 `~/.dsh-wechat`）、`UNAPPROVED_REPLY`（未授权自动回复文案）、`LOG_LEVEL`（debug/info）。
@@ -204,6 +209,7 @@ curl http://127.0.0.1:51235/status
 ## 🧪 开发与测试
 
 - 语法：`node --check <file>`；网关/插件零构建（纯 JS ESM）。
+- 单元测试：`npm test`（窗口分类 + 保鲜状态机，`node --test`，不联网）。
 - 会话结算单元测试：`node dsh-wechat-bridge/settle.test.mjs`（覆盖 turn/end 结算、超时、报错、丢弃兜底、模型覆盖等场景，共 7 项）。
 - 网关可独立运行调试：`cd wechat-gateway && npm install && node gateway.mjs`。
 - 修改宿主插件或网关后需**重启 DSH** 生效；修改 `client.js`（悬浮球）同样重启生效（boot 图缓存）。
@@ -236,7 +242,8 @@ DSH_WECHAT_STATE_DIR="$(mktemp -d)" npm run verify:full
 | 面板「无法连接网关」 | 网关没起来。DSH Desktop（Electron）必须用 `ELECTRON_RUN_AS_NODE=1` 拉起网关（0.1.1 已内置）。检查 `netstat -ano \| findstr 51235` 是否 LISTENING；看日志 `wechat-gateway:` 行 |
 | 登录后重启又要扫码 | 正常情况会自动恢复；若出现「登录已失效」说明 token 被微信侧吊销，需重扫 |
 | 微信发消息没反应 | 面板确认状态为「已连接」；新联系人需先批准；日志看 `dsh-wechat-bot:` 行 |
-| 回复/主动推送失败 | 登录态失效：面板解绑后重新扫码，或删 `~/.dsh-wechat/accounts/`。主动推送依赖最近一次交互的 `context_token`（网关已自动落盘复用），长期无交互后先让用户发一条消息 |
+| 回复/主动推送失败 | 先查窗口，别只查登录：`curl http://127.0.0.1:51235/window`（或 `POST /probe`）。`ret=-2 prepare failed` / `reason=window_closed` = 腾讯侧会话窗口已关，光靠入站 `context_token` 打不开，让用户给机器人发一句话即可恢复；保鲜循环也会在「开→关」跳变时弹一次桌面通知。若 `window` 为 open 仍失败，才是登录态失效：面板解绑后重新扫码，或删 `~/.dsh-wechat/accounts/` |
+| 显示 `window_closed` 但用户说刚发过消息 | 时钟来自真实入站（`last-inbound.json`）：确认手机确实送达、网关日志有该入站行；`POST /probe` 返回 `ret=-3` 才代表窗口真的开着 |
 | 模型配置不生效 | 确认面板保存成功；配置只对**微信发起的回合**生效（GUI 手动回合不受影响） |
 | 想清空所有状态 | 删除 `~/.dsh-wechat/`（凭证/模型/会话映射一并清除） |
 
@@ -252,6 +259,7 @@ MIT。上游 [`lubaiUwU/DSH-WeChatClawBot`](https://github.com/lubaiUwU/DSH-WeCh
 
 | 提交 | 类型 | 内容 |
 |---|---|---|
+| `0.2.1` | **修复** | **把「会话窗口健康 + 保鲜提醒」收进插件**（「机器人不通知」的真正根因）：网关对每条入站消息落盘 `last-inbound.json`，暴露 `GET /window` 与 `POST /probe`（发往不存在收件人的无损探针），`/send` 失败时返回机器可读的 `reason`/`hint`；宿主插件内置保鲜循环，窗口「开→关」跳变时提醒一次、之后不再空探，直到用户回话。存活探针补上 `version` 字段。全新机器安装插件即自带，无需本机脚本/launchd。 |
 | `6668793` | **修复** | **登录循环覆盖**：`startLogin` 每轮递增 `state.loginGen`，旧轮次只能 `bailIfSuperseded` 静默退出，不能再 `setPhase`/刷新二维码（原来会把 `logged_in` 改回 `waiting_qrcode`）；`/send` 只校验持有 token、不再硬卡 phase，二维码刷新期间不丢已生成的回复；`modelServer` 增加 `error` 监听，端口占用不再终结 DSH 宿主。 |
 | `273601d` | **修复** | **主动推送 `context_token` 复用**：iLink 的 `sendmessage` 需要「打开的会话上下文」，入站消息带 `context_token` 但原网关只在自动回复路径透传，所有 fire-and-forget 推送（日报/通知/派发器）在距上次交互一段时间后一律 `502 ret=-2 prepare failed`。修复把每个发送者最近一次的 `context_token` 落盘（`<stateDir>/context-tokens.json`，0600，最多 50 个），`/send` 在调用方未显式提供时自动复用；调用方仍可用 `contextToken` 覆盖。 |
 | 本次 | **新增/调整** | ① 打成**单一 npm 包**（`index.js` 转出宿主、`dsh.client` 声明悬浮球），移除了上游的 `file:` 子包依赖与 `prepare`/`postinstall`——上游那种结构在 pnpm 10 下 `dsh plugin add` 会因「解析不到 `file:` 子包」或「build scripts 被拦截」而**直接装不上**；② `GET /api/dsh-wechat-bot/probe` 宿主存活探针；③ `DSH_WECHAT_GATEWAY_PORT` / `DSH_WECHAT_MODEL_PORT` / `DSH_WECHAT_STATE_DIR` 三个环境变量覆盖（默认值不变），用于隔离的可移植性验证；④ 补齐 `scripts/portability.mjs` + `PORTABILITY-SOP.md` + `verify` 三条 npm script；⑤ 宿主内 `dsh-wechat-bridge` 改为相对导入，安装路径不再依赖 peer 垫片。 |
