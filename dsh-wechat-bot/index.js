@@ -107,16 +107,24 @@ export const Config = Schema.object({
   healthCheckLimit: Schema.number().default(5),
   /**
    * Built-in conversation-window keepalive (2026-09-19). Tencent only accepts
-   * proactive pushes while the user's conversation window is open; the gateway
-   * persists an inbound clock and exposes GET /window + POST /probe, and this
-   * loop turns a silent "open → closed" transition into an explicit desktop
-   * notification. No local launchd job / hand-written script is required on a
-   * fresh machine — it ships with the plugin.
+   * proactive pushes while the user's conversation window is open. The gateway
+   * persists the inbound clock and the last **real-send** outcome and exposes
+   * them on GET /window; this loop turns a silent "open → closed" transition —
+   * and a silence longer than keepaliveWarnHours — into a desktop notification.
+   * No local launchd job / hand-written script is required on a fresh machine.
+   *
+   * NOTE: there is deliberately no probe step. A send to a bogus recipient
+   * returns `ret=-3 invalid arguments` regardless of the user's window (Tencent
+   * rejects the recipient before preparing a conversation), so it cannot judge
+   * the window — verified 2026-09-19 (probe said open while a real send with no
+   * context_token failed `ret=-2`).
    */
   keepalive: Schema.boolean().default(true),
   /** How often to check the window (minutes). */
   keepaliveIntervalMinutes: Schema.number().default(30),
-  /** Optional old behaviour: nudge on WeChat when open and silent ≥ this many hours (0 = off). */
+  /** Remind on the desktop once silence since the last inbound reaches this many hours (0 = off). */
+  keepaliveWarnHours: Schema.number().default(2),
+  /** Optional extra WeChat nudge while the window is open and silent ≥ this many hours (0 = off). */
   keepaliveNudgeHours: Schema.number().default(0),
   /** Show a desktop notification when the window closes (macOS only). */
   keepaliveNotify: Schema.boolean().default(true),
@@ -469,13 +477,14 @@ export function apply(ctx, config) {
   }
 
   /**
-   * Conversation-window keepalive. Tencent only accepts proactive pushes while
-   * the user's conversation window is open; the gateway persists the inbound
-   * clock and answers GET /window + POST /probe. The state machine:
-   *   1. window open   → do nothing (don't nag)
-   *   2. open → closed → desktop notification once ("reply to renew")
-   *   3. already closed → stop probing until the inbound clock changes
-   * Optional old behaviour --keepaliveNudgeHours > 0 nudges on WeChat while open.
+   * Conversation-window keepalive. The window signal is the gateway's last
+   * **real-send** observation (`GET /window`), never a probe — a send to a bogus
+   * recipient returns `ret=-3` regardless of the user's window. The state
+   * machine:
+   *   1. window open                 → stay quiet (unless silence ≥ warn/nudge)
+   *   2. open → closed (real send)   → desktop notification once ("reply to renew")
+   *   3. silence ≥ keepaliveWarnHours → desktop reminder once per inbound
+   * Optional `keepaliveNudgeHours > 0` additionally nudges on WeChat while open.
    */
   const keepaliveFile = join(stateBase, 'window-keepalive.json')
   let keepaliveTimer
@@ -492,26 +501,12 @@ export function apply(ctx, config) {
       return
     }
 
-    // Decide first (pure), then probe only if the state machine asks for it.
-    const dry = evaluateWindowTick({
-      ledger,
-      report,
-      nudgeHours: config.keepaliveNudgeHours,
-    })
-    let probe = null
-    if (dry.needProbe) {
-      try {
-        probe = await gatewayPost('/probe', {})
-      } catch (error) {
-        logger.warn(`dsh-wechat-bot: window probe failed: ${String(error)}`)
-      }
-    }
     const now = Date.now()
     const decision = evaluateWindowTick({
       ledger,
       report,
-      probe,
       now,
+      warnHours: config.keepaliveWarnHours,
       nudgeHours: config.keepaliveNudgeHours,
     })
     const next = decision.ledger
@@ -525,6 +520,20 @@ export function apply(ctx, config) {
       logger.warn(`dsh-wechat-bot: 微信会话窗口已关闭（${ageText}），桌面提醒${okNotify ? '已弹出' : '未弹出'}`)
     } else if (decision.transition === 'recovered') {
       logger.info('dsh-wechat-bot: 微信会话窗口已恢复（用户回话生效）')
+    }
+
+    // Time-based reminder on the reliable desktop channel: the window can close
+    // sooner than we can observe it, so remind the user to reply — once per inbound.
+    if (typeof next.dueWarnHours === 'number') {
+      const silentHours = next.dueWarnHours
+      delete next.dueWarnHours
+      next.lastWarnedInboundMs = decision.lastInboundMs
+      next.lastWarnedHours = silentHours
+      const okNotify = await desktopNotify(
+        '微信通道该续期了',
+        `已 ${silentHours.toFixed(1)} 小时没有收到你的消息。腾讯侧会话窗口会随时间关闭，关了就推不出微信通知（会走桌面兜底）。回机器人一句话即可续期。`,
+      )
+      logger.warn(`dsh-wechat-bot: 静默 ${silentHours.toFixed(1)} 小时 ≥ ${config.keepaliveWarnHours}h，桌面提醒${okNotify ? '已弹出' : '未弹出'}`)
     }
 
     // Optional old behaviour: while open and silent past the threshold, nudge

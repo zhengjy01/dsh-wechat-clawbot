@@ -782,22 +782,28 @@ const server = createServer(async (req, res) => {
       return json(res, 200, publicStatus())
     }
     if (req.method === 'GET' && url.pathname === '/window') {
-      // Conversation-window health: last inbound stamp + last send/probe result.
-      // Read-only; safe for external watchers (keepalive / notification scripts).
+      // Conversation-window health: last inbound stamp + last **real send**
+      // result. Read-only; safe for external watchers (keepalive / scripts).
       return json(res, 200, windowReport())
     }
     if (req.method === 'POST' && url.pathname === '/probe') {
-      // Lossless window probe: send to a **nonexistent** recipient, which makes
-      // Tencent answer before any delivery (ret=-3 open / ret=-2 closed). The
-      // user never receives anything. HTTP 200 means "probe completed", not
-      // "window open" — read the `window` field.
+      // Connectivity probe only — NOT a window oracle.
+      //
+      // 2026-09-19 correction: this used to claim `ret=-3` meant "window open".
+      // It does not. Sending to a **bogus recipient** makes Tencent reject the
+      // arguments *before* it ever prepares a conversation, so it answers
+      // `ret=-3 invalid arguments` regardless of the user's window (verified:
+      // probe said open while a real send with no context_token failed `ret=-2`
+      // 1 second later). The endpoint therefore reports reachability and leaves
+      // `window-state.json` untouched, so it can never fabricate a window state.
       if (!state.token) {
         return json(res, 409, {
           ok: false,
           probe: true,
-          window: WINDOW_UNKNOWN,
+          conclusive: false,
+          reachable: false,
           reason: 'not_logged_in',
-          hint: '网关未登录：先扫码登录再探测窗口。',
+          hint: '网关未登录：先扫码登录。',
         })
       }
       try {
@@ -815,33 +821,26 @@ const server = createServer(async (req, res) => {
             },
           },
         })
-        const saved = observeWindow({ window: WINDOW_OPEN, source: 'probe', ret: 0, reason: 'probe_ok' })
         return json(res, 200, {
           ok: true,
           probe: true,
-          window: WINDOW_OPEN,
+          conclusive: false,
+          reachable: true,
           ret: 0,
-          reason: 'probe_ok',
-          observedAt: saved.observedAt,
+          reason: 'probe_reachable',
+          hint: '上游可达，但该探测无法判断用户会话窗口是否打开。',
         })
       } catch (error) {
         const cls = classifySendError(error)
-        const saved = observeWindow({
-          window: cls.window,
-          source: 'probe',
-          ret: cls.ret,
-          reason: cls.reason,
-          body: String(error.message ?? error),
-        })
         return json(res, 200, {
-          ok: cls.window !== WINDOW_UNKNOWN,
+          ok: true,
           probe: true,
-          window: cls.window,
+          conclusive: false,
+          reachable: true,
           ret: cls.ret,
           reason: cls.reason,
-          hint: cls.hint,
+          hint: '上游可达，但该探测无法判断用户会话窗口是否打开；窗口状态只看 GET /window（最近一次真实发送的结果）。',
           body: String(error.message ?? error).slice(0, 200),
-          observedAt: saved.observedAt,
         })
       }
     }

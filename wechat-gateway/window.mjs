@@ -112,7 +112,7 @@ export function buildWindowReport(input = {}) {
       ? '窗口已关闭：主动推送会被腾讯以 ret=-2 拒绝。让用户回一句话即可恢复。'
       : window === WINDOW_OPEN
         ? '窗口开着：可以主动推送。'
-        : '尚无窗口观测：调用 POST /probe 做一次无损探测，或等下一次 /send。'
+        : '尚无窗口观测：窗口状态只来自最近一次**真实发送**（/send）的结果，等下一次发送后即可判定；POST /probe 只能验证上游可达、不作数。'
   return {
     ok: true,
     phase: typeof input.phase === 'string' ? input.phase : WINDOW_UNKNOWN,
