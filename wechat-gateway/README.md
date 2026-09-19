@@ -18,8 +18,8 @@ node gateway.mjs     # 默认 http://127.0.0.1:51235
 | 方法 | 路径 | 说明 |
 |---|---|---|
 | GET | `/status` | 状态（phase/message/accountId/qrcodeDataUrl/allowlist/window/lastInboundAt） |
-| GET | `/window` | **会话窗口健康**：`window`(open/closed/unknown)、`lastInboundAt`、`age`、最近一次发送/探测结果与 `hint` |
-| POST | `/probe` | **无损窗口探针**：发往不存在的收件人，腾讯走到参数校验即返回（`ret=-3` 窗口开 / `ret=-2` 窗口关），**不会给用户发消息** |
+| GET | `/window` | **会话窗口健康**：`window`(open/closed/unknown)、`lastInboundAt`、`age`、最近一次**真实发送**结果与 `hint` |
+| POST | `/probe` | **可达性探测（不作数）**：发往不存在的收件人，只能证明上游可达；**它判断不了用户窗口**（任何状态下都 `ret=-3`），且不会改写窗口状态 |
 | POST | `/login` | 获取/刷新登录二维码（已登录时拒绝，需先 `/logout`） |
 | POST | `/verifycode` | `{code}` 提交手机验证码 |
 | POST | `/logout` | 登出并停止轮询 |
@@ -32,11 +32,12 @@ node gateway.mjs     # 默认 http://127.0.0.1:51235
 腾讯 iLink 只在用户「会话窗口」打开时接受主动推送，而本地 `phase` 反映不出这一点（`logged_in` 也可能发不出去）。网关因此：
 
 - 对**每条入站消息**落盘 `$STATE_DIR/last-inbound.json`（不能用 `context-tokens.json` 的 `updatedAt`——token 未变化时它跳过写入，时间会冻住）；
-- 把最近一次发送/探测的观测落盘 `$STATE_DIR/window-state.json`，并由 `/status`、`/window` 暴露；
-- `/send` 失败时按 `ret` 分类：`ret=-2` → `reason=window_closed`（窗口已关）、`ret=-3` → `window_open_invalid_arguments`（窗口开着，是请求本身的问题），并附人类可读 `hint`；
-- `POST /probe` 用「发往不存在收件人」的方式无损探测窗口状态。
+- 把**最近一次真实发送**的结果落盘 `$STATE_DIR/window-state.json`，并由 `/status`、`/window` 暴露；
+- `/send` 失败时按 `ret` 分类：`ret=-2` → `reason=window_closed`（窗口/会话上下文不可用）、`ret=-3` → `window_open_invalid_arguments`（请求本身的问题），并附人类可读 `hint`。
 
-实测边界（2026-09-19）：距上次入站 3h / 5h 仍可发、22.7h 已关闭（5h–22.7h 之间未标定）。
+> ⚠️ **不要把 `POST /probe` 当窗口判据（2026-09-19 修正）**：曾经以为「发往不存在收件人 → `ret=-3` 表示窗口开、`ret=-2` 表示窗口关」，但**腾讯在遇到不存在的收件人时会在「准备会话」之前就做参数校验**，所以它在**任何**窗口状态下都返回 `ret=-3`。实测：探针报 open，一秒钟后**不带 `context_token`** 的真实发送仍然 `ret=-2`。因此窗口状态**只取真实 `/send` 的结果**；`/probe` 退化为「只验证上游可达」，且不改写窗口状态。
+
+实测边界：距上次入站 3h 曾可发、也有 **1h44m 后即被拒** 的实例、22.7h 已关闭——**真实窗口长度未标定**，别把某个数值当安全阈值。
 
 ## 登录与持久化
 
