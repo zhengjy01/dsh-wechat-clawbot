@@ -6,11 +6,13 @@
  * It exposes a small HTTP + SSE surface so the DSH host plugin
  * (dsh-wechat-bot) and the browser floating-ball UI can drive it.
  *
- *   GET  /status          → { phase, qrcodeDataUrl?, qrcodeUrl?, accountId?, ... }
+ *   GET  /status          → { phase, qrcodeDataUrl?, qrcodeUrl?, accountId?, window?, ... }
+ *   GET  /window          → conversation-window health (last inbound + last send/probe)
+ *   POST /probe           → silent window probe (sends to a nonexistent recipient)
  *   POST /login           → start (or refresh) QR login
  *   POST /verifycode      → submit the numeric code WeChat shows after scanning
  *   POST /logout          → log out and stop the monitor
- *   GET  /events          → SSE: login/state, message, approval, send/result
+ *   GET  /events          → SSE: login/state, message, approval, send/result, window/state
  *   POST /send            → { to, text, contextToken? } send a text message
  *   GET  /allowlist       → approved wxids
  *   POST /allow           → { wxid, allow } approve/reject a sender
@@ -27,6 +29,14 @@ import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import QRCode from 'qrcode'
+import {
+  WINDOW_OPEN,
+  WINDOW_CLOSED,
+  WINDOW_UNKNOWN,
+  PROBE_RECIPIENT,
+  classifySendError,
+  buildWindowReport,
+} from './window.mjs'
 
 // ── configuration ──────────────────────────────────────────────────────────
 const PORT = Number(process.env.PORT ?? 51235)
@@ -180,6 +190,99 @@ function saveContextToken(wxid, token) {
   writeJson(contextTokensPath(), store)
 }
 
+// ── inbound clock + conversation-window health ─────────────────────────────
+// The context-token store above CANNOT double as an inbound clock: saveContextToken
+// skips the write when the token is unchanged, and a burst of messages in one
+// conversation often carries the same token — its `updatedAt` then freezes.
+// Every inbound message therefore stamps its own `last-inbound.json` here, and
+// the window health is derived from that stamp plus the last outbound observation.
+const lastInboundPath = () => path.join(stateDir(), 'last-inbound.json')
+const windowStatePath = () => path.join(stateDir(), 'window-state.json')
+
+function loadLastInbound() {
+  const rec = readJson(lastInboundPath(), null)
+  if (!rec || typeof rec !== 'object' || Array.isArray(rec)) return null
+  if (!Number.isFinite(Number(rec.ts)) && typeof rec.at === 'string') {
+    const parsed = Date.parse(rec.at)
+    if (Number.isFinite(parsed)) return { ...rec, ts: parsed }
+  }
+  return rec
+}
+/** Stamp the inbound clock. Called for EVERY inbound message (allowlisted or not). */
+function saveLastInbound(from, text) {
+  const prev = loadLastInbound()
+  const now = Date.now()
+  const rec = {
+    at: new Date(now).toISOString(),
+    ts: now,
+    from: typeof from === 'string' ? from : '',
+    preview: String(text ?? '').slice(0, 80),
+    count: (Number(prev?.count) || 0) + 1,
+    source: 'gateway',
+  }
+  try {
+    writeJson(lastInboundPath(), rec)
+  } catch (error) {
+    log('warn', `saveLastInbound: ${String(error)}`)
+  }
+  return rec
+}
+function loadWindowState() {
+  const rec = readJson(windowStatePath(), {})
+  return rec && typeof rec === 'object' && !Array.isArray(rec) ? rec : {}
+}
+function saveWindowState(patch) {
+  const next = { ...loadWindowState(), ...patch }
+  try {
+    writeJson(windowStatePath(), next)
+  } catch (error) {
+    log('warn', `saveWindowState: ${String(error)}`)
+  }
+  return next
+}
+/**
+ * Persist a window observation and broadcast a `window/state` event on change.
+ * @param {{window:string, source:string, ret?:number|null, reason?:string, body?:string}} observation
+ */
+function observeWindow(observation) {
+  const prev = loadWindowState()
+  const now = Date.now()
+  const next = {
+    ...prev,
+    window: observation.window,
+    source: observation.source,
+    ret: observation.ret ?? null,
+    reason: observation.reason ?? '',
+    body: observation.body ? String(observation.body).slice(0, 200) : '',
+    observedAt: new Date(now).toISOString(),
+    closedSince:
+      observation.window === WINDOW_CLOSED ? prev.closedSince || new Date(now).toISOString() : null,
+  }
+  const saved = saveWindowState(next)
+  if (prev.window !== saved.window) {
+    log('info', `window -> ${saved.window} (${observation.source})`)
+    broadcast('window/state', {
+      window: saved.window,
+      source: saved.source,
+      ret: saved.ret,
+      observedAt: saved.observedAt,
+    })
+  }
+  return saved
+}
+function windowReport() {
+  const ws = loadWindowState()
+  return buildWindowReport({
+    window: ws.window,
+    observedAt: ws.observedAt,
+    source: ws.source,
+    lastInbound: loadLastInbound(),
+    lastSend: ws.lastSend ?? null,
+    now: Date.now(),
+    phase: state.phase,
+  })
+}
+
 // ── iLink protocol core (from @tencent-weixin/openclaw-weixin, MIT) ────────
 function randomWechatUin() {
   const uint32 = randomBytes(4).readUInt32BE(0)
@@ -301,7 +404,14 @@ async function sendMessage({ baseUrl, token, body, timeoutMs }) {
     timeoutMs: timeoutMs ?? 15000,
   })
   const resp = JSON.parse(raw)
-  if (resp.ret && resp.ret !== 0) throw new Error(`sendMessage ret=${resp.ret} ${resp.errmsg ?? ''}`)
+  if (resp.ret && resp.ret !== 0) {
+    const error = new Error(`sendMessage ret=${resp.ret} ${resp.errmsg ?? ''}`)
+    // Keep the numeric code so callers can classify the conversation window
+    // (ret=-2 closed / ret=-3 open) instead of pattern-matching the message.
+    error.ret = resp.ret
+    error.errmsg = resp.errmsg
+    throw error
+  }
   return resp
 }
 async function notifyStart(baseUrl, token) {
@@ -553,6 +663,10 @@ async function startMonitor() {
         const text = extractText(full.item_list)
         const contextToken = full.context_token ?? undefined
         if (!from) continue
+        // Any inbound message opens (or renews) the conversation window — stamp
+        // the clock for every sender, before the allowlist check, so the health
+        // report reflects the real "last time the user talked to the bot".
+        saveLastInbound(from, text)
         // Remember this sender's freshest conversation context so proactive
         // outbound pushes (no inbound message to reply to) can still be sent.
         if (contextToken) saveContextToken(from, contextToken)
@@ -638,6 +752,8 @@ function readBody(req) {
   })
 }
 function publicStatus() {
+  const ws = loadWindowState()
+  const inbound = loadLastInbound()
   return {
     phase: state.phase,
     message: state.message,
@@ -646,6 +762,12 @@ function publicStatus() {
     qrcodeDataUrl: state.qrcodeDataUrl,
     allowlist: loadAllowlist(),
     port: PORT,
+    // Conversation-window health: local phase alone cannot tell whether
+    // proactive sends will actually be accepted upstream.
+    window: ws.window ?? WINDOW_UNKNOWN,
+    windowObservedAt: ws.observedAt ?? null,
+    lastInboundAt: inbound?.at ?? null,
+    contextTokenCount: Object.keys(loadContextTokens()).length,
   }
 }
 
@@ -658,6 +780,70 @@ const server = createServer(async (req, res) => {
   try {
     if (req.method === 'GET' && url.pathname === '/status') {
       return json(res, 200, publicStatus())
+    }
+    if (req.method === 'GET' && url.pathname === '/window') {
+      // Conversation-window health: last inbound stamp + last send/probe result.
+      // Read-only; safe for external watchers (keepalive / notification scripts).
+      return json(res, 200, windowReport())
+    }
+    if (req.method === 'POST' && url.pathname === '/probe') {
+      // Lossless window probe: send to a **nonexistent** recipient, which makes
+      // Tencent answer before any delivery (ret=-3 open / ret=-2 closed). The
+      // user never receives anything. HTTP 200 means "probe completed", not
+      // "window open" — read the `window` field.
+      if (!state.token) {
+        return json(res, 409, {
+          ok: false,
+          probe: true,
+          window: WINDOW_UNKNOWN,
+          reason: 'not_logged_in',
+          hint: '网关未登录：先扫码登录再探测窗口。',
+        })
+      }
+      try {
+        await sendMessage({
+          baseUrl: state.baseUrl,
+          token: state.token,
+          body: {
+            msg: {
+              from_user_id: '',
+              to_user_id: PROBE_RECIPIENT,
+              client_id: `dsh-probe:${Date.now()}-${randomBytes(4).toString('hex')}`,
+              message_type: 2,
+              message_state: 2,
+              item_list: [{ type: 1, text_item: { text: 'window-probe' } }],
+            },
+          },
+        })
+        const saved = observeWindow({ window: WINDOW_OPEN, source: 'probe', ret: 0, reason: 'probe_ok' })
+        return json(res, 200, {
+          ok: true,
+          probe: true,
+          window: WINDOW_OPEN,
+          ret: 0,
+          reason: 'probe_ok',
+          observedAt: saved.observedAt,
+        })
+      } catch (error) {
+        const cls = classifySendError(error)
+        const saved = observeWindow({
+          window: cls.window,
+          source: 'probe',
+          ret: cls.ret,
+          reason: cls.reason,
+          body: String(error.message ?? error),
+        })
+        return json(res, 200, {
+          ok: cls.window !== WINDOW_UNKNOWN,
+          probe: true,
+          window: cls.window,
+          ret: cls.ret,
+          reason: cls.reason,
+          hint: cls.hint,
+          body: String(error.message ?? error).slice(0, 200),
+          observedAt: saved.observedAt,
+        })
+      }
     }
     if (req.method === 'GET' && url.pathname === '/events') {
       res.writeHead(200, {
@@ -757,11 +943,56 @@ const server = createServer(async (req, res) => {
             },
           },
         })
+        observeWindow({ window: WINDOW_OPEN, source: 'send', ret: 0, reason: 'send_ok' })
+        saveWindowState({
+          lastSend: { ok: true, at: new Date().toISOString(), ret: 0, reason: '', to },
+        })
         broadcast('send/result', { to, ok: true, ts: Date.now() })
-        return json(res, 200, { ok: true })
+        return json(res, 200, { ok: true, window: WINDOW_OPEN })
       } catch (error) {
-        broadcast('send/result', { to, ok: false, error: String(error), ts: Date.now() })
-        return json(res, 502, { error: String(error.message ?? error) })
+        // Classify the failure: ret=-2 means the Tencent-side conversation
+        // window is closed (the real reason behind "the bot silently stopped
+        // notifying"), ret=-3 means the window is open and the request itself
+        // was rejected. Callers get a machine-readable reason + a human hint
+        // instead of a bare "ret=-2 prepare failed".
+        const cls = classifySendError(error)
+        observeWindow({
+          window: cls.window,
+          source: 'send',
+          ret: cls.ret,
+          reason: cls.reason,
+          body: String(error.message ?? error),
+        })
+        const report = windowReport()
+        saveWindowState({
+          lastSend: {
+            ok: false,
+            at: new Date().toISOString(),
+            ret: cls.ret,
+            reason: cls.reason,
+            to,
+            body: String(error.message ?? error).slice(0, 200),
+          },
+        })
+        broadcast('send/result', {
+          to,
+          ok: false,
+          error: String(error),
+          reason: cls.reason,
+          window: cls.window,
+          ts: Date.now(),
+        })
+        return json(res, 502, {
+          ok: false,
+          error: String(error.message ?? error),
+          reason: cls.reason,
+          ret: cls.ret,
+          window: cls.window,
+          hint: cls.hint,
+          lastInboundAt: report.lastInboundAt,
+          age: report.age,
+          ageMs: report.ageMs,
+        })
       }
     }
     if (req.method === 'GET' && url.pathname === '/allowlist') {

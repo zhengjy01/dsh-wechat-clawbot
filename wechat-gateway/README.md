@@ -17,13 +17,26 @@ node gateway.mjs     # 默认 http://127.0.0.1:51235
 
 | 方法 | 路径 | 说明 |
 |---|---|---|
-| GET | `/status` | 状态（phase/message/accountId/qrcodeDataUrl/allowlist） |
+| GET | `/status` | 状态（phase/message/accountId/qrcodeDataUrl/allowlist/window/lastInboundAt） |
+| GET | `/window` | **会话窗口健康**：`window`(open/closed/unknown)、`lastInboundAt`、`age`、最近一次发送/探测结果与 `hint` |
+| POST | `/probe` | **无损窗口探针**：发往不存在的收件人，腾讯走到参数校验即返回（`ret=-3` 窗口开 / `ret=-2` 窗口关），**不会给用户发消息** |
 | POST | `/login` | 获取/刷新登录二维码（已登录时拒绝，需先 `/logout`） |
 | POST | `/verifycode` | `{code}` 提交手机验证码 |
 | POST | `/logout` | 登出并停止轮询 |
-| GET | `/events` | SSE：`login/state`、`message`、`approval`、`send/result` |
-| POST | `/send` | `{to, text, contextToken?}` 发文本消息 |
+| GET | `/events` | SSE：`login/state`、`message`、`approval`、`send/result`、`window/state` |
+| POST | `/send` | `{to, text, contextToken?}` 发文本消息；失败时返回 `reason`/`ret`/`window`/`hint` |
 | GET | `/allowlist` / POST | 白名单查询 / `{wxid, allow}` 批准 |
+
+## 会话窗口健康（2026-09-19）
+
+腾讯 iLink 只在用户「会话窗口」打开时接受主动推送，而本地 `phase` 反映不出这一点（`logged_in` 也可能发不出去）。网关因此：
+
+- 对**每条入站消息**落盘 `$STATE_DIR/last-inbound.json`（不能用 `context-tokens.json` 的 `updatedAt`——token 未变化时它跳过写入，时间会冻住）；
+- 把最近一次发送/探测的观测落盘 `$STATE_DIR/window-state.json`，并由 `/status`、`/window` 暴露；
+- `/send` 失败时按 `ret` 分类：`ret=-2` → `reason=window_closed`（窗口已关）、`ret=-3` → `window_open_invalid_arguments`（窗口开着，是请求本身的问题），并附人类可读 `hint`；
+- `POST /probe` 用「发往不存在收件人」的方式无损探测窗口状态。
+
+实测边界（2026-09-19）：距上次入站 3h / 5h 仍可发、22.7h 已关闭（5h–22.7h 之间未标定）。
 
 ## 登录与持久化
 
