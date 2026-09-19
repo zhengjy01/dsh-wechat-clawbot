@@ -18,15 +18,31 @@
  * approvals in the floating-ball panel.
  */
 
-import { spawn } from 'node:child_process'
+import { spawn, execFile } from 'node:child_process'
 import { createServer } from 'node:http'
 import fs from 'node:fs'
 import { homedir } from 'node:os'
 import { fileURLToPath } from 'node:url'
 import { dirname, join, isAbsolute } from 'node:path'
+import { promisify } from 'node:util'
 import Schema from '@deepseek-ai/schemastery'
 import { settingsNamespace } from '@deepseek-ai/dsh-settings'
 import { createBridge } from '../dsh-wechat-bridge/index.js'
+import { evaluateWindowTick } from './keepalive.mjs'
+
+const execFileAsync = promisify(execFile)
+
+/** This package's version, reported by the liveness probe (CHANGELOG promised it). */
+const PACKAGE_VERSION = (() => {
+  try {
+    const pkg = JSON.parse(
+      fs.readFileSync(join(dirname(fileURLToPath(import.meta.url)), '..', 'package.json'), 'utf8'),
+    )
+    return typeof pkg.version === 'string' ? pkg.version : ''
+  } catch {
+    return ''
+  }
+})()
 
 export const name = 'dsh-wechat-bot'
 /** The agent registry is accessed through createBridge; declare it for this fiber. */
@@ -70,6 +86,21 @@ export const Config = Schema.object({
   model: Schema.string(),
   /** Restart the gateway after this many consecutive failed health checks (0 = never). */
   healthCheckLimit: Schema.number().default(5),
+  /**
+   * Built-in conversation-window keepalive (2026-09-19). Tencent only accepts
+   * proactive pushes while the user's conversation window is open; the gateway
+   * persists an inbound clock and exposes GET /window + POST /probe, and this
+   * loop turns a silent "open → closed" transition into an explicit desktop
+   * notification. No local launchd job / hand-written script is required on a
+   * fresh machine — it ships with the plugin.
+   */
+  keepalive: Schema.boolean().default(true),
+  /** How often to check the window (minutes). */
+  keepaliveIntervalMinutes: Schema.number().default(30),
+  /** Optional old behaviour: nudge on WeChat when open and silent ≥ this many hours (0 = off). */
+  keepaliveNudgeHours: Schema.number().default(0),
+  /** Show a desktop notification when the window closes (macOS only). */
+  keepaliveNotify: Schema.boolean().default(true),
   /** HTTP port for the ClawBot model-management endpoint (GET/POST /model). Env override: DSH_WECHAT_MODEL_PORT. */
   modelPort: Schema.number().default(envPort('DSH_WECHAT_MODEL_PORT', 51236)),
   /** Optional initial ClawBot model override: { provider, model, reasoningEffort? }. */
@@ -357,9 +388,167 @@ export function apply(ctx, config) {
     }
   }
 
+  /** Read a JSON file, falling back to an empty object. */
+  const readJsonFile = (file) => {
+    try {
+      return JSON.parse(fs.readFileSync(file, 'utf8'))
+    } catch {
+      return {}
+    }
+  }
+  const writeJsonFile = (file, value) => {
+    try {
+      fs.mkdirSync(dirname(file), { recursive: true })
+      fs.writeFileSync(file, JSON.stringify(value, null, 2), 'utf8')
+    } catch (error) {
+      logger.warn(`dsh-wechat-bot: persist ${file} failed: ${String(error)}`)
+    }
+  }
+
+  /** Recipient resolution, same convention as the notify/daily-report scripts. */
+  const resolveRecipient = () => {
+    const accountsDir = join(stateBase, 'accounts')
+    const readUserId = (file) => {
+      const parsed = readJsonFile(file)
+      const v = parsed && typeof parsed === 'object' ? parsed.userId : ''
+      return typeof v === 'string' ? v.trim() : ''
+    }
+    const list = readJsonFile(join(stateBase, 'accounts.json'))
+    if (Array.isArray(list)) {
+      for (const id of [...list].reverse()) {
+        if (typeof id !== 'string' || id.trim() === '') continue
+        const found = readUserId(join(accountsDir, `${id.trim()}.json`))
+        if (found) return found
+      }
+    }
+    try {
+      for (const f of fs.readdirSync(accountsDir)) {
+        if (!f.endsWith('.json') || f.endsWith('.sync.json')) continue
+        const found = readUserId(join(accountsDir, f))
+        if (found) return found
+      }
+    } catch {
+      /* no accounts yet */
+    }
+    return ''
+  }
+
+  /** Best-effort desktop notification (macOS only, never throws). */
+  const desktopNotify = async (title, text) => {
+    if (!config.keepaliveNotify || process.platform !== 'darwin') return false
+    const script = [
+      `display notification ${JSON.stringify(String(text).slice(0, 220))}`,
+      `with title ${JSON.stringify(String(title).slice(0, 80))}`,
+      'sound name "Glass"',
+    ].join(' ')
+    try {
+      await execFileAsync('osascript', ['-e', script])
+      return true
+    } catch {
+      return false
+    }
+  }
+
+  /**
+   * Conversation-window keepalive. Tencent only accepts proactive pushes while
+   * the user's conversation window is open; the gateway persists the inbound
+   * clock and answers GET /window + POST /probe. The state machine:
+   *   1. window open   → do nothing (don't nag)
+   *   2. open → closed → desktop notification once ("reply to renew")
+   *   3. already closed → stop probing until the inbound clock changes
+   * Optional old behaviour --keepaliveNudgeHours > 0 nudges on WeChat while open.
+   */
+  const keepaliveFile = join(stateBase, 'window-keepalive.json')
+  let keepaliveTimer
+
+  const keepaliveTick = async () => {
+    const ledger = readJsonFile(keepaliveFile)
+    let report
+    try {
+      const res = await fetch(`${gatewayUrl}/window`, { signal: AbortSignal.timeout(5000) })
+      if (!res.ok) throw new Error(`HTTP ${res.status}`)
+      report = await res.json()
+    } catch (error) {
+      logger.warn(`dsh-wechat-bot: window check failed: ${String(error)}`)
+      return
+    }
+
+    // Decide first (pure), then probe only if the state machine asks for it.
+    const dry = evaluateWindowTick({
+      ledger,
+      report,
+      nudgeHours: config.keepaliveNudgeHours,
+    })
+    let probe = null
+    if (dry.needProbe) {
+      try {
+        probe = await gatewayPost('/probe', {})
+      } catch (error) {
+        logger.warn(`dsh-wechat-bot: window probe failed: ${String(error)}`)
+      }
+    }
+    const now = Date.now()
+    const decision = evaluateWindowTick({
+      ledger,
+      report,
+      probe,
+      now,
+      nudgeHours: config.keepaliveNudgeHours,
+    })
+    const next = decision.ledger
+
+    if (decision.transition === 'closed') {
+      const ageText = report?.age && report.age !== '未知' ? `距用户上次发消息约 ${report.age}` : '静默时长未知'
+      const okNotify = await desktopNotify(
+        '微信会话窗口已关闭',
+        `${ageText}。回机器人一句话即可恢复微信推送；期间通知走 macOS 横幅兜底，不会漏。`,
+      )
+      logger.warn(`dsh-wechat-bot: 微信会话窗口已关闭（${ageText}），桌面提醒${okNotify ? '已弹出' : '未弹出'}`)
+    } else if (decision.transition === 'recovered') {
+      logger.info('dsh-wechat-bot: 微信会话窗口已恢复（用户回话生效）')
+    }
+
+    // Optional old behaviour: while open and silent past the threshold, nudge
+    // the user on WeChat to renew the window (off by default).
+    if (typeof next.dueNudgeHours === 'number') {
+      const silentHours = next.dueNudgeHours
+      delete next.dueNudgeHours
+      const to = resolveRecipient()
+      if (to) {
+        const text =
+          `【通道保鲜提醒】你已经 ${silentHours.toFixed(1)} 小时没跟机器人说话了。\n` +
+          '腾讯侧的会话窗口会随时间关闭——一旦关闭，我就再也推不出任何消息（日报、任务通知全部静默）。\n' +
+          '回我一句就行（「在」也可以），窗口立刻续期。'
+        try {
+          await gatewayPost('/send', { to, text })
+          next.lastNudgeMs = now
+          next.lastNudgeAt = new Date(now).toISOString()
+          logger.info(`dsh-wechat-bot: 已发送通道保鲜提醒（静默 ${silentHours.toFixed(1)} 小时 → ${to}）`)
+        } catch (error) {
+          logger.warn(`dsh-wechat-bot: 保鲜提醒发送失败：${String(error)}`)
+        }
+      }
+    }
+
+    writeJsonFile(keepaliveFile, next)
+  }
+
   startGateway()
   void consumeEvents()
   void healthLoop()
+
+  // Built-in conversation-window keepalive — ships with the plugin, so a fresh
+  // install needs no local launchd job or hand-written script. The first tick
+  // waits one full interval (default 30 min), which also keeps the isolated
+  // portability verification from probing the real account.
+  if (config.keepalive) {
+    const intervalMs = Math.max(5, config.keepaliveIntervalMinutes) * 60_000
+    keepaliveTimer = setInterval(() => {
+      void keepaliveTick()
+    }, intervalMs)
+    keepaliveTimer.unref?.()
+    logger.info(`dsh-wechat-bot: conversation-window keepalive every ${Math.round(intervalMs / 60_000)} min`)
+  }
 
   // ── ClawBot model management endpoint ────────────────────────────────
   const DEEPSEEK_EFFORTS = ['off', 'high', 'max']
@@ -506,6 +695,7 @@ export function apply(ctx, config) {
           const payload = JSON.stringify({
             ok: true,
             plugin: name,
+            version: PACKAGE_VERSION,
             gatewayPort: config.gatewayPort,
             modelPort: config.modelPort,
           })
@@ -526,6 +716,7 @@ export function apply(ctx, config) {
     () => () => {
       stopped = true
       eventsAbort?.abort()
+      if (keepaliveTimer !== undefined) clearInterval(keepaliveTimer)
       modelServer.closeAllConnections?.()
       modelServer.close()
       if (child !== undefined) {

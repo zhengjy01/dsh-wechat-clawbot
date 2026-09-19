@@ -31,6 +31,7 @@
     "scripts/release.mjs"
   ],
   "scripts": {
+    "test": "node --test dsh-wechat-bot/keepalive.test.mjs wechat-gateway/window.test.mjs",
     "verify": "node scripts/portability.mjs --health /api/dsh-wechat-bot/probe",
     "verify:full": "node scripts/portability.mjs --health /api/dsh-wechat-bot/probe --stability 30",
     "verify:quick": "node scripts/portability.mjs --skip-audit --stability 5 --health /api/dsh-wechat-bot/probe",
