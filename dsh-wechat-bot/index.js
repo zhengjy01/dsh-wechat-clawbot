@@ -48,6 +48,25 @@ export const name = 'dsh-wechat-bot'
 /** The agent registry is accessed through createBridge; declare it for this fiber. */
 export const inject = ['agents']
 
+/**
+ * Build the read-only liveness-probe payload.
+ *
+ * Kept as an exported pure function (not inlined in the route handler) so
+ * `npm test` can assert the contract without mounting the plugin — mounting
+ * spawns the gateway and binds ports. The `version` field is the local
+ * package.json version: the 0.2.0 CHANGELOG promised it but the payload
+ * omitted it until 0.2.1.
+ */
+export function probePayload(gatewayPort, modelPort) {
+  return {
+    ok: true,
+    plugin: name,
+    version: PACKAGE_VERSION,
+    gatewayPort,
+    modelPort,
+  }
+}
+
 /** Read a positive integer from an environment variable, else the fallback. */
 function envPort(name, fallback) {
   const raw = process.env[name]
@@ -692,13 +711,7 @@ export function apply(ctx, config) {
         kind: 'exact',
         path: '/api/dsh-wechat-bot/probe',
         handler: (req, res) => {
-          const payload = JSON.stringify({
-            ok: true,
-            plugin: name,
-            version: PACKAGE_VERSION,
-            gatewayPort: config.gatewayPort,
-            modelPort: config.modelPort,
-          })
+          const payload = JSON.stringify(probePayload(config.gatewayPort, config.modelPort))
           res.writeHead(200, {
             'content-type': 'application/json; charset=utf-8',
             'cache-control': 'no-store',
