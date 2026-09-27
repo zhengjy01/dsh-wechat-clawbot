@@ -35,6 +35,7 @@ DSH agent (dedicated WeChat conversation area; context is kept long-term)
 - **Explicit new-conversation command** — send `/new` in WeChat (or `/新对话` / `/新会话`), or press "New conversation" in the panel. Otherwise the same conversation is always reused.
 - **ClawBot-specific model** — pick a model and thinking effort (off/high/max) in the panel; it persists across restarts and applies **only to WeChat turns**.
 - **Contact allowlist** — allow everyone by default; approve or ignore new contacts from the panel.
+- **Remote approval** — a WeChat-driven turn that needs a decision sends the question to the **same WeChat conversation**: reply `1` to approve once or `2` to reject (`/approve`, `/reject`, `批准`, `拒绝` also work). Timeout, a closed conversation window, or no outbound transport **delegates the ask to the GUI** — it never fails silently. Requires a session permission preset other than `danger-full-access`, under which the approval policy is `never` and nothing is ever asked.
 - **Conversation-window health & keepalive** — Tencent only accepts proactive pushes while the user's conversation window is open (the local login `phase` does **not** reflect this). The gateway stamps every inbound message into `last-inbound.json`, records the outcome of each **real** send in `window-state.json`, and exposes `GET /window` plus machine-readable `reason`/`hint` on send failure (`window_closed` / `window_open_invalid_arguments`). The host plugin runs a built-in keepalive loop: it notifies once when a real send proves the window closed, and once per inbound when silence passes `keepaliveWarnHours`. **There is deliberately no probe** — a send to a bogus recipient always answers `ret=-3`, so it cannot judge the window. **No local script or launchd job is needed.**
 
 ## 🖥️ Requirements
@@ -128,6 +129,26 @@ Then restart DSH and scan the floating ball.
 - **ClawBot model** — the panel's quick-pick lists models with configured keys; "custom" lets you type a provider/model, and you can choose a thinking effort (off/high/max). It applies **only to WeChat turns** and survives restarts; pick "follow DSH default" and save to clear it.
 - **New contacts** — an empty allowlist allows everyone; strangers get an automatic notice and appear in the panel for approve/ignore.
 
+### Remote approval (approve sensitive actions from WeChat)
+
+When a **WeChat-driven turn** hits an action that needs approval, the plugin sends the question to the **same WeChat conversation**, so one short reply on your phone decides it — no walk back to the desktop.
+
+1. **Lower the session permission preset first:** `Settings → Permissions` → `workspace-write` (or `read-only`). Under `danger-full-access` the approval policy is `never`, so **no approval request is ever raised** and there is nothing to approve.
+2. **Confirm `approval: wechat`:** on by default (`approval: wechat` in `cordis.patch.yml`). Switch back to `reject` (refuse with a note) or `ignore` (leave it to the desktop GUI) for the old behavior.
+3. **Send a WeChat instruction** that triggers an approval-requiring action (e.g. "delete the temp files in this directory").
+4. **Read the question:** a message arrives with the tool, the reason, and "reply 1 = approve once / 2 = reject".
+5. **Reply `1` (or `/approve`, `批准`)** to grant it once, or **`2` (or `/reject`, `拒绝`)** to refuse. A receipt follows ("✅ approved once (…)" / "❌ rejected (…)") and the agent continues.
+6. **No answer in time is fine:** after `approvalTimeoutMs` (180 s by default), when WeChat delivery fails (conversation window closed), or while another question is already waiting, the ask **falls through to the DSH GUI** — it never fails silently.
+
+> **Screenshot slot 1 — the approval question in WeChat**
+> Capture the "⚠️ needs approval" message in the ClawBot chat on your phone (tool name, reason, and the "reply 1 = approve once / 2 = reject" lines).
+> Blur local paths, your user name, and any sensitive command in the question.
+> Replace this block with `![Remote approval in WeChat](docs/images/dsh-wechat-clawbot-1-approval-prompt.png)` once the image exists.
+
+> **Screenshot slot 2 — reply and receipt**
+> Capture the "✅ approved once (…)" reply right after you send `1`; showing the question above it in the same shot is better.
+> Replace this block with `![Approval receipt](docs/images/dsh-wechat-clawbot-2-approval-result.png)` once the image exists.
+
 ## ⚙️ Configuration
 
 `$DSH_HOME/profiles/<desktop|web>/cordis.patch.yml` (`dsh plugin add` writes this section; the full form):
@@ -141,7 +162,8 @@ Then restart DSH and scan the floating ball.
         modelPort: 51236          # model-config endpoint port (default 51236)
         timeoutMs: 300000         # per-turn timeout
         maxMessageChars: 20000
-        approval: reject          # in-turn approvals: auto-reject with a note (re-runnable in the GUI)
+        approval: wechat          # in-turn approvals: ask in WeChat (1 = approve once / 2 = reject); timeout delegates to the GUI
+        approvalTimeoutMs: 180000 # how long to wait for that reply (ms; 0 = wait until the turn ends)
         keepalive: true           # built-in conversation-window keepalive (default true)
         keepaliveIntervalMinutes: 30   # how often to check the window
         keepaliveWarnHours: 2     # desktop reminder once per inbound when silence reaches N hours (0 = off)
@@ -156,8 +178,9 @@ The host plugin's ports and state directory can also be overridden by environmen
 ## 🧪 Development and testing
 
 - Syntax: `node --check <file>`. Gateway and plugins are plain JS ESM with **zero build**.
-- Unit tests: `npm test` (window classification + keepalive state machine, `node --test`; no network).
+- Unit tests: `npm test` (window classification + keepalive state machine + settlement + remote approval, `node --test`; no network — 18 + 7 + 40 cases).
 - Session-settlement unit tests: `node dsh-wechat-bridge/settle.test.mjs` (turn/end settlement, timeout, errors, discard fallback, model override — 7 cases).
+- Remote-approval unit tests: `node dsh-wechat-bridge/approval.test.mjs` (approve/reject/slash commands, unrelated text never claimed, timeout and delivery failure delegate to the GUI, non-bridged turns untouched, serialized questions, release on turn end — 40 cases).
 - The gateway can run standalone for debugging: `cd wechat-gateway && npm install && node gateway.mjs`.
 - After changing the host plugin or the gateway you must **restart DSH**; `client.js` (floating ball) also needs a restart (boot-graph cache).
 

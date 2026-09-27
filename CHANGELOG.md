@@ -5,6 +5,23 @@
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-09-27
+
+把「回合内审批」从**只能拒绝 / 只能让位**，变成**可以在微信里远程批准**。
+
+### 新增 (Added)
+
+- **`approval: wechat`（新的默认值）**：微信发起的回合遇到审批请求时，插件把问句发到**同一个微信对话**——工具名 + 理由 + 「回复 1 = 批准一次 / 2 = 拒绝」；你的回复被 `claimApprovalReply` 认领，`allowed-once` / `rejected` 交回审批瀑布，**问句不会再被当成新 prompt 发给 agent**。
+- **多级兜底，不静默 fail-closed**：超时（`approvalTimeoutMs`，默认 180 秒）、问句发不出去（会话窗口关闭 `ret=-2` 等）、或根本没有出站通道（纯 HTTP bridge）时，一律 `next()` **让位给 GUI** 的 answerer；回合结束 / 取消 / 超时时待批作废为 `cancelled`，流程不会挂死。
+- **并发去重**：同一个微信对话一次只问一条，其余排队（问句里标注「还有 N 条排队」），答完自动发下一条。
+- **`GET /health` 增加 `approvals`**：当前待批数量。
+- **单元测试 `dsh-wechat-bridge/approval.test.mjs`**（40 项）：批准 / 拒绝 / 斜杠命令、无关文本不得被吞、超时与投递失败转 GUI、非桥接回合不插手、串行问句、回合结束作废、旧模式不回退。
+
+### 变更 (Changed)
+
+- `approval` 默认值由 `reject` 改为 `wechat`；要维持旧行为写 `approval: reject`（直接拒绝并在回复里注明）或 `approval: ignore`（留给 GUI）。
+- `npm test` 现在也跑 bridge 的 settle / approval 两套脚本测试（共 18 + 7 + 40 项）。
+
 ## [0.2.2] - 2026-09-19
 
 修正 0.2.1 里一个会让保鲜功能**静默失效**的判据错误。

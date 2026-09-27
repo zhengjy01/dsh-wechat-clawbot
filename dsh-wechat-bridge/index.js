@@ -6,12 +6,17 @@
  *
  *   POST /message   { text, sessionKey? }  →  { reply, sessionId, stopReason }
  *   POST /cancel    { sessionId? }         →  { ok }
- *   GET  /health                           →  { ok, session, pending }
+ *   GET  /health                           →  { ok, session, pending, approvals }
  *   GET  /sessions                         →  { sessions: [...] }
  *
  * The reply is the committed assistant text of the turn, collected from
  * `session/event` streams — the same committed text the GUI renders. One turn
  * per session runs at a time; extra messages queue per session.
+ *
+ * With `approval: 'wechat'` the caller may inject a `notify(text, sessionKey)`
+ * transport into the config; bridge-driven turns then ask the messenger for a
+ * decision (`claimApprovalReply(text, sessionKey)` consumes the answer) and
+ * delegate the ask to the GUI answerer on timeout or delivery failure.
  *
  * The session-driving core is exported as {@link createBridge} so other host
  * plugins (e.g. dsh-wechat-bot) can inject messages without the HTTP surface.
@@ -64,8 +69,24 @@ export const Config = Schema.object({
   timeoutMs: Schema.number().default(300000),
   /** Reject inbound text longer than this many characters. */
   maxMessageChars: Schema.number().default(20000),
-  /** Approval policy for bridged turns: 'reject' auto-rejects, 'ignore' leaves the ask pending in the GUI. */
-  approval: Schema.union([Schema.const('reject'), Schema.const('ignore')]).default('reject'),
+  /**
+   * Approval policy for bridged turns:
+   *   'reject' — auto-reject and note it in the reply (the GUI user can re-run);
+   *   'ignore' — leave the ask pending for the GUI answerer;
+   *   'wechat' — ask in the messenger and wait for a reply (1 批准 / 2 拒绝);
+   *              without a `notify` transport, or on timeout, it delegates to
+   *              the GUI answerer instead of failing the action closed.
+   */
+  approval: Schema.union([
+    Schema.const('reject'),
+    Schema.const('ignore'),
+    Schema.const('wechat'),
+  ]).default('reject'),
+  /**
+   * How long a messenger approval question waits for a reply before it is
+   * delegated to the GUI answerer (ms; 0 = wait until the turn ends).
+   */
+  approvalTimeoutMs: Schema.number().default(180000),
   /** Optional provider override for bridge-owned sessions. */
   provider: Schema.string(),
   /** Optional model override for bridge-owned sessions. */
@@ -163,6 +184,152 @@ export function createBridge(ctx, config) {
     return record
   }
 
+  // ── messenger approvals (config.approval === 'wechat') ─────────────────────
+  // A bridged turn that hits an approval ask sends the question to its own
+  // conversation and waits for the reply. `notify` is the outbound transport
+  // injected by the caller (dsh-wechat-bot wires it to the gateway); the HTTP
+  // bridge has none, so 'wechat' degrades to delegating the ask to the GUI.
+  const notify = typeof config.notify === 'function' ? config.notify : undefined
+  /** Words accepted as a grant / a refusal, matched case-insensitively. */
+  const APPROVAL_ALLOW = new Set(['1', 'y', 'yes', 'ok', 'approve', '/approve', '批准', '同意', '允许', '通过'])
+  const APPROVAL_DENY = new Set(['2', 'n', 'no', 'reject', '/reject', '拒绝', '不同意', '驳回'])
+  /** conversation key → { pending: ask[], active?: ask }; one question in flight per conversation. */
+  const approvals = new Map()
+
+  const approvalQueueFor = (key) => {
+    let queue = approvals.get(key)
+    if (queue === undefined) {
+      queue = { pending: [], active: undefined }
+      approvals.set(key, queue)
+    }
+    return queue
+  }
+
+  const askText = (ask, waiting) =>
+    [
+      `⚠️ 需要审批${waiting > 1 ? `（还有 ${waiting - 1} 条排队）` : ''}`,
+      `工具：${ask.tool}`,
+      ...(ask.reason !== undefined && ask.reason !== '' ? [`理由：${ask.reason}`] : []),
+      '',
+      '回复 1 = 批准一次 / 2 = 拒绝',
+      config.approvalTimeoutMs > 0
+        ? `${Math.round(config.approvalTimeoutMs / 1000)} 秒内未回复则转到电脑上的 DSH 界面处理。`
+        : '未回复前该操作会一直等待。',
+    ].join('\n')
+
+  /**
+   * Settle one ask and move the conversation's queue forward.
+   * @param ask - the ask being settled.
+   * @param outcome - 'allowed-once' | 'rejected' | 'cancelled' | 'delegate'.
+   * @param note - optional confirmation line pushed back to the conversation.
+   */
+  const finishAsk = (ask, outcome, note) => {
+    if (ask.settled) return
+    ask.settled = true
+    clearTimeout(ask.timer)
+    const queue = approvals.get(ask.key)
+    if (queue !== undefined) {
+      const at = queue.pending.indexOf(ask)
+      if (at >= 0) queue.pending.splice(at, 1)
+      if (queue.active === ask) queue.active = undefined
+      if (queue.pending.length === 0 && queue.active === undefined) approvals.delete(ask.key)
+    }
+    ask.resolve(outcome)
+    if (note !== undefined && notify !== undefined) {
+      void Promise.resolve()
+        .then(() => notify(note, ask.sessionKey))
+        .catch((error) => logger.warn(`dsh-wechat-bridge: approval note failed: ${String(error)}`))
+    }
+    const next = approvals.get(ask.key)?.pending[0]
+    if (next !== undefined) void sendAsk(next)
+  }
+
+  /** Push one ask to its conversation and arm its timeout. */
+  const sendAsk = async (ask) => {
+    const queue = approvals.get(ask.key)
+    if (queue === undefined || ask.settled) return
+    queue.active = ask
+    try {
+      await notify(askText(ask, queue.pending.length), ask.sessionKey)
+    } catch (error) {
+      logger.warn(`dsh-wechat-bridge: approval prompt not delivered (${String(error)}) — delegating to the GUI`)
+      finishAsk(ask, 'delegate')
+      return
+    }
+    if (ask.settled) return
+    if (config.approvalTimeoutMs > 0) {
+      ask.timer = setTimeout(() => {
+        finishAsk(ask, 'delegate', `⏱ 审批超时（${ask.tool}），已转到电脑上的 DSH 界面处理。`)
+      }, config.approvalTimeoutMs)
+    }
+  }
+
+  /**
+   * Ask the messenger to decide one approval request.
+   * @returns 'allowed-once' | 'rejected' | 'cancelled', or 'delegate' when the
+   *   question could not be asked (no transport) so the caller calls `next()`.
+   */
+  const askInMessenger = (key, sessionKey, request) =>
+    new Promise((resolve) => {
+      const ask = {
+        key,
+        sessionKey,
+        tool: request.toolName,
+        reason: typeof request.reason === 'string' ? request.reason : undefined,
+        resolve,
+        timer: undefined,
+        settled: false,
+      }
+      queueMicrotask(() => {
+        if (ask.settled) return
+        const queue = approvalQueueFor(key)
+        queue.pending.push(ask)
+        // Withdrawing the question (turn ended / cancelled) releases the wait:
+        // the service already settled the request, so the value is discarded.
+        request.signal?.addEventListener?.('abort', () => finishAsk(ask, 'cancelled'), { once: true })
+        if (queue.active === undefined) void sendAsk(ask)
+      })
+    })
+
+  /**
+   * Consume one inbound messenger text as the answer to a pending question.
+   * @returns true when the text was consumed — callers must not forward it to
+   *   the agent as a prompt.
+   */
+  const claimApprovalReply = (text, sessionKey) => {
+    const token = String(text ?? '').trim().toLowerCase()
+    const outcome = APPROVAL_ALLOW.has(token)
+      ? 'allowed-once'
+      : APPROVAL_DENY.has(token)
+        ? 'rejected'
+        : undefined
+    if (outcome === undefined) return false
+    const key = sessionKey ?? ''
+    const ask = approvals.get(key)?.active
+    if (ask === undefined) return false
+    finishAsk(
+      ask,
+      outcome,
+      outcome === 'allowed-once'
+        ? `✅ 已批准一次（${ask.tool}）`
+        : `❌ 已拒绝（${ask.tool}）`,
+    )
+    return true
+  }
+
+  /** Release every question of a session whose turn settled or failed. */
+  const releaseApprovals = (sessionId, sessionKey) => {
+    for (const key of new Set([sessionKey ?? sessionId, sessionId])) {
+      const queue = approvals.get(key)
+      if (queue === undefined) continue
+      for (const ask of [...queue.pending]) finishAsk(ask, 'cancelled')
+    }
+  }
+
+  /** Questions currently waiting for a messenger reply. */
+  const approvalCount = () =>
+    [...approvals.values()].reduce((n, queue) => n + queue.pending.length, 0)
+
   /** Resolve the target session id for one inbound message. */
   const resolveSessionId = (requestedKey) => {
     if (config.sessionMode === 'explicit') {
@@ -247,6 +414,7 @@ export function createBridge(ctx, config) {
     const inflight = {
       messageId: message.id,
       turn: undefined,
+      sessionKey,
       chunks: [],
       timer: undefined,
       resolve,
@@ -259,6 +427,7 @@ export function createBridge(ctx, config) {
       if (record.inflight !== inflight) return
       record.inflight = undefined
       clearTimeout(inflight.timer)
+      releaseApprovals(sessionId, inflight.sessionKey)
       inflight.resolve({
         reply: inflight.chunks.join(''),
         stopReason: reason,
@@ -270,6 +439,7 @@ export function createBridge(ctx, config) {
       if (record.inflight !== inflight) return
       record.inflight = undefined
       clearTimeout(inflight.timer)
+      releaseApprovals(sessionId, inflight.sessionKey)
       inflight.reject(error)
       drain(record, sessionId)
     }
@@ -383,13 +553,24 @@ export function createBridge(ctx, config) {
     }
   })
 
-  // Bridge-driven turns cannot be approved from the messenger: auto-reject by
-  // default (the GUI user can see and re-run the action there), or leave the
-  // ask pending in the GUI with 'ignore'.
-  ctx.on('approval/request', (request, next) => {
+  // Bridged turns decide approvals here, per config.approval:
+  //   'reject' — refuse and note it in the reply (the GUI user can re-run);
+  //   'ignore' — leave the ask to the GUI answerer;
+  //   'wechat' — ask in the messenger and wait for 1 / 2, delegating to the GUI
+  //              on timeout, on delivery failure, or when no transport exists.
+  // Asks from sessions the bridge does not drive always fall through to `next()`.
+  ctx.on('approval/request', async (request, next) => {
     const record = records.get(String(request.agent.session.id))
     if (record === undefined || record.inflight === undefined) return next()
     if (config.approval === 'ignore') return next()
+    if (config.approval === 'wechat') {
+      if (notify === undefined) return next()
+      const sessionKey = record.inflight.sessionKey
+      const key = sessionKey ?? String(request.agent.session.id)
+      const outcome = await askInMessenger(key, sessionKey, request)
+      if (outcome === 'delegate') return next()
+      return outcome
+    }
     record.inflight.chunks.push('\n\n> ⚠️ 该操作需要批准，已在 GUI 中拒绝，请在 GUI 中手动执行。')
     return 'rejected'
   })
@@ -433,7 +614,15 @@ export function createBridge(ctx, config) {
     return sessionId
   }
 
-  return { sendText, cancelTurn, liveSessionIds, pendingCount, resolveSessionId }
+  return {
+    sendText,
+    cancelTurn,
+    liveSessionIds,
+    pendingCount,
+    resolveSessionId,
+    claimApprovalReply,
+    approvalCount,
+  }
 }
 
 /**
@@ -485,6 +674,7 @@ export function apply(ctx, config) {
           mode: config.sessionMode,
           session: live.length > 0 ? live[live.length - 1] : null,
           pending: bridge.pendingCount(),
+          approvals: bridge.approvalCount(),
         })
       }
       if (req.method === 'GET' && url.pathname === '/sessions') {

@@ -536,15 +536,25 @@ if (!hasClient) {
   try {
     const index = await browse(token === '' ? `${base}/` : `${base}/?token=${token}`)
     const html = await index.text()
-    const urls = [...html.matchAll(/\/plugins\/\?\?[^"\\\s]+/g)].map((match) => match[0].replaceAll('&amp;', '&'))
-    const bundleUrl = urls.sort((a, b) => b.length - a.length)[0] ?? ''
+    // 交付地址的形态随 DSH 版本变过，两种都要认：
+    //   - 旧版：绝对路径 `/plugins/??<id>/client.js,…&rev=…`
+    //   - 0.1.7 起：**文档相对**（核心 dsh-client-modules 的 comboReference =
+    //     comboUrl.slice(1)，见 core note web-document-relative-app-routes），
+    //     即 `plugins/??<id>/client.js,…&rev=…`，index 里**没有**前导斜杠。
+    //     2026-09-27 实测：0.1.7-rc.2 的 index 里 `/plugins/` 绝对引用出现 0 次，
+    //     旧正则因此对**每一个带客户端半的插件**都误报「客户端半没注册」。
+    // 只放宽前缀，语义断言不变（清单里必须能找到本插件）。
+    const urls = [...html.matchAll(/\/?plugins\/\?\?[^"\\\s]+/g)].map((match) => match[0].replaceAll('&amp;', '&'))
+    // 启动清单按阶段分片（多条 combo），最长那条未必含本插件——在**全部** combo 里找。
+    const bundleUrl = urls.find((url) => url.includes(`${id}/client.js`)) ?? ''
+    const toAbsolute = (path) => (path.startsWith('/') ? `${base}${path}` : `${base}/${path}`)
     if (index.status === 401) {
       warn('抓 index 被拒（没有 token），跳过运行时界面校验（静态校验已通过）')
-    } else if (bundleUrl === '') fail('index 里找不到客户端 bundle 交付地址（客户端半没注册）', `HTTP ${index.status}${bootErrors(readBootLog()).length > 0 ? '｜' + bootErrors(readBootLog())[0] : ''}`)
-    else if (bundleUrl.includes(`${id}/client.js`)) pass('bundle 已被 shell 收进启动清单', `${id}/client.js`)
-    else fail('bundle 没进启动清单（面板/入口不会出现）', bundleUrl.slice(0, 150))
+    } else if (urls.length === 0) fail('index 里找不到客户端 bundle 交付地址（客户端半没注册）', `HTTP ${index.status}${bootErrors(readBootLog()).length > 0 ? '｜' + bootErrors(readBootLog())[0] : ''}`)
+    else if (bundleUrl === '') fail('bundle 没进启动清单（面板/入口不会出现）', urls.join(' ｜ ').slice(0, 150))
+    else pass('bundle 已被 shell 收进启动清单', `${id}/client.js`)
     if (bundleUrl !== '') {
-      const bundle = await (await fetch(`${base}${bundleUrl}`)).text()
+      const bundle = await (await fetch(toAbsolute(bundleUrl))).text()
       if (bundle.includes(id)) pass('bundle 可下载且含插件标记', `${(bundle.length / 1024).toFixed(0)} kB`)
       else fail('bundle 内容里找不到插件 id')
     }

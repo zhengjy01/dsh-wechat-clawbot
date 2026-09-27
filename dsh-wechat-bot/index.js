@@ -97,8 +97,21 @@ export const Config = Schema.object({
   timeoutMs: Schema.number().default(300000),
   /** Reject inbound text longer than this many characters. */
   maxMessageChars: Schema.number().default(20000),
-  /** Approval policy for bridged turns: 'reject' auto-rejects, 'ignore' leaves the ask pending in the GUI. */
-  approval: Schema.union([Schema.const('reject'), Schema.const('ignore')]).default('reject'),
+  /**
+   * Approval policy for WeChat-driven turns:
+   *   'wechat' — send the ask to the WeChat conversation and wait for a reply
+   *              (1 批准 / 2 拒绝); timeout or a failed send delegates to the
+   *              GUI answerer, so nothing ever fails silently closed;
+   *   'reject' — refuse immediately and note it in the reply;
+   *   'ignore' — leave the ask to the GUI answerer.
+   */
+  approval: Schema.union([
+    Schema.const('wechat'),
+    Schema.const('reject'),
+    Schema.const('ignore'),
+  ]).default('wechat'),
+  /** How long a WeChat approval question waits for a reply (ms; 0 = until the turn ends). */
+  approvalTimeoutMs: Schema.number().default(180000),
   /** Optional provider override for bridge-owned sessions. */
   provider: Schema.string(),
   /** Optional model override for bridge-owned sessions. */
@@ -196,6 +209,12 @@ export function apply(ctx, config) {
   const logger = ctx.logger
   const stateBase = config.stateDir !== '' ? config.stateDir : join(homedir(), '.dsh-wechat')
 
+  // 审批问答的目标会话/收件人：微信对话区 key → 最近一次消息的来件人。
+  // 审批问句必须回到「用户发消息的那个微信对话」，所以按 key 记来源，
+  // 并保留最近一次来源作为 sessionKey 缺失时的兜底。
+  const approvalRecipients = new Map()
+  let lastRecipient
+
   // bridgeConfig 是传给 createBridge 的共享配置对象；modelOverride 槽由
   // 模型端点动态替换，bridge 每次 model 请求实时读取（不会丢失）。
   const bridgeConfig = {
@@ -205,10 +224,19 @@ export function apply(ctx, config) {
     timeoutMs: config.timeoutMs,
     maxMessageChars: config.maxMessageChars,
     approval: config.approval,
+    approvalTimeoutMs: config.approvalTimeoutMs,
     provider: config.provider,
     model: config.model,
     modelOverride: undefined,
     sessionMapFile: join(stateBase, 'bridge-sessions.json'),
+    // 出站通道：审批问句/结果确认直接发回对应微信对话（sendToWechat 定义在
+    // 下方，挂载时不会被调用，只有真的出现 ask 时才走）。
+    notify: async (text, sessionKey) => {
+      const target =
+        (sessionKey !== undefined ? approvalRecipients.get(sessionKey) : undefined) ?? lastRecipient
+      if (target === undefined) throw new Error('no WeChat conversation to notify yet')
+      await sendToWechat(target.from, text, target.contextToken)
+    },
   }
   const bridge = createBridge(ctx, bridgeConfig)
 
@@ -298,6 +326,16 @@ export function apply(ctx, config) {
     const { from, text, contextToken } = event
     const body = typeof text === 'string' ? text.trim() : ''
     if (!from || body === '') return
+    const sessionKey = `wechat:${wechatSessionIndex}`
+    const recipient = { from, contextToken }
+    approvalRecipients.set(sessionKey, recipient)
+    lastRecipient = recipient
+    // 审批答复优先认领：有待批问题时，回复 1/2（或 /approve、/reject）就是
+    // 决定，绝不能再当成新 prompt 发给 agent。
+    if (bridge.claimApprovalReply(body, sessionKey)) {
+      logger.info(`dsh-wechat-bot: approval answer from ${from}: ${body}`)
+      return
+    }
     // 切换对话命令：开一个新的微信对话区（不发给 agent）
     if (body === '/new' || body === '/新对话' || body === '/新会话') {
       const index = newWechatSession()
@@ -312,7 +350,7 @@ export function apply(ctx, config) {
     try {
       // 微信消息固定进「微信对话区」（bridge 创建的独立会话，keyed 按编号
       // 复用上下文）；绝不注入 GUI 当前会话。
-      const result = await bridge.sendText(body, `wechat:${wechatSessionIndex}`)
+      const result = await bridge.sendText(body, sessionKey)
       if (result.reply !== '') await sendToWechat(from, result.reply, contextToken)
     } catch (error) {
       logger.warn(`dsh-wechat-bot: turn failed for ${from}: ${String(error)}`)

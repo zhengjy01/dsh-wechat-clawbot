@@ -17,4 +17,7 @@
         sessionMode: active
         timeoutMs: 300000
         maxMessageChars: 20000
-        approval: reject
+        # 回合内审批：wechat 把问句发到微信（回 1 批准 / 2 拒绝），
+        # 超时或发不出去就转 GUI；也可改回 reject（直接拒）或 ignore（留给 GUI）。
+        approval: wechat
+        approvalTimeoutMs: 180000
