@@ -1,6 +1,6 @@
 {
   "name": "dsh-wechat-clawbot",
-  "version": "0.2.2",
+  "version": "0.3.0",
   "description": "DSH bundle: WeChat floating-ball bridge (QR login, message relay, remote approval, ClawBot model config) — maintained fork of lubaiUwU/DSH-WeChatClawBot",
   "type": "module",
   "main": "index.js",
