@@ -219,7 +219,7 @@ Only `✅ 通过` permits a release. Criteria live in `PORTABILITY-SOP.md`.
 
 ## Compatibility
 
-Requires **DeepSeek Harness >= 0.1.5-rc.1** (declared as `dsh.engines.dsh`) and is verified against **0.1.5-rc.1** — including the isolated-`DSH_HOME` tarball install, the `/api/dsh-wechat-bot/probe` health route, and the client bundle registering in `__DSH_BOOT__.entries`. Node.js >= 22.19 is required by the DSH engine.
+Requires **DeepSeek Harness >= 0.1.5-rc.1** (declared as `dsh.engines.dsh`) and is verified against **0.1.5-rc.1** — including the isolated-`DSH_HOME` tarball install, the `/api/dsh-wechat-bot/probe` health route, and the client bundle registering in `__DSH_BOOT__.entries`. Node.js >= 22.19 is required by the DSH engine. **Since this version** the `peerDependencies` range explicitly declares compatibility with **DSH 0.2.0-rc.2** (`^0.2.0-rc.2` is now included), so no compatibility warning appears on 0.2.0-rc.2. No functional change.
 
 ## 📄 License
 
